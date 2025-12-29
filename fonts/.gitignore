@@ -1,0 +1,13 @@
+# Ignore all font files
+*.ttf
+*.otf
+*.ttc
+*.woff
+*.woff2
+
+# Ignore all subdirectories
+*/
+
+# Keep this README
+!README.md
+!.gitignore

@@ -1,0 +1,45 @@
+# Ameba configuration for code quality
+
+# Disable cyclomatic complexity temporarily (will be addressed in refactoring)
+Metrics/CyclomaticComplexity:
+  Enabled: false
+  MaxComplexity: 15
+
+# Allow not_nil! usage (common in Crystal for performance-critical code)
+Lint/NotNil:
+  Enabled: false
+
+# Allow boolean methods without ? suffix (for compatibility)
+Naming/QueryBoolMethods:
+  Enabled: true
+  Exclude:
+    - src/crimage/ycbcr.cr
+    - src/crimage/image/*.cr
+
+# Allow documentation admonitions
+Documentation/DocumentationAdmonition:
+  Enabled: false
+
+# Allow type names that don't follow convention (for compatibility with Go naming)
+Naming/TypeNames:
+  Enabled: false
+
+# Allow binary operator parameter names
+Naming/BinaryOperatorParameterName:
+  Enabled: false
+
+# Enable most other rules for code quality
+Style/LargeNumbers:
+  Enabled: true
+
+Style/NegatedConditionsInUnless:
+  Enabled: true
+
+Style/RedundantReturn:
+  Enabled: true
+
+Lint/UnusedArgument:
+  Enabled: true
+
+Lint/ShadowingOuterLocalVar:
+  Enabled: true

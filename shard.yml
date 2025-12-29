@@ -1,0 +1,13 @@
+name: crimage
+version: 1.0.0
+
+authors:
+  - Ali Naqvi <syed.alinaqvi@gmail.com>
+description: |
+  A comprehensive 2D image processing library for Crystal with support for multiple formats (PNG, JPEG, GIF, BMP, TIFF, WebP, ICO), 
+  drawing primitives, text rendering with TrueType fonts, color transformations, filters, and effects. 
+  Includes SIMD-accelerated operations for performance-critical tasks.
+
+crystal: ~> 1.0
+
+license: MIT
