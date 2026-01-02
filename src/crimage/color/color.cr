@@ -371,6 +371,19 @@ module CrImage::Color
     # An alpha-premultiplied color component c has been scaled by alpha (a),
     # so has valid values 0 <= c <= a.
     abstract def rgba : {UInt32, UInt32, UInt32, UInt32}
+
+    # Returns the color as an 8-bit RGBA struct.
+    # Converts 16-bit color components to 8-bit by taking the high byte.
+    #
+    # Example:
+    # ```
+    # color = CrImage::Color::RGBA64.new(0xFFFF_u16, 0x8000_u16, 0x0000_u16, 0xFFFF_u16)
+    # rgba8 = color.to_rgba8 # => RGBA(255, 128, 0, 255)
+    # ```
+    def to_rgba8 : RGBA
+      r, g, b, a = rgba
+      RGBA.new((r >> 8).to_u8, (g >> 8).to_u8, (b >> 8).to_u8, (a >> 8).to_u8)
+    end
   end
 
   # RGBA represents a traditional 32-bit alpha-premultiplied color, having

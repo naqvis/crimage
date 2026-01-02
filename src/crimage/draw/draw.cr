@@ -307,8 +307,15 @@ module CrImage::Draw
   end
 
   private def self.draw_fill_over(dst : RGBA, r : Rectangle, sr : UInt32, sg : UInt32, sb : UInt32, sa : UInt32)
-    # Scale to 16-bit color space for proper blending
-    a = (MAX_COLOR_VALUE - sa) * COLOR_SCALE_8_TO_16
+    # The 0x101 is here for the same reason as in draw_rgba:
+    # dr, dg, db and da are all 8-bit color at the moment, ranging in [0,255].
+    # We work in 16-bit color, and so would normally do:
+    # dr |= dr << 8
+    # and similarly for dg, db and da, but instead we multiply a
+    # (which is a 16-bit color, ranging in [0,65535]) by 0x101.
+    # This yields the same result, but is fewer arithmetic operations.
+    # Use wrapping arithmetic (&*, &-, &+) to prevent overflow.
+    a = (MAX_COLOR_VALUE &- sa) &* 0x101
     i0 = dst.pixel_offset(r.min.x, r.min.y)
     i1 = i0 + r.width*4
     r.min.y.upto(r.max.y - 1) do |_|
@@ -318,10 +325,10 @@ module CrImage::Draw
         db = dst.pix[i + 2]
         da = dst.pix[i + 3]
 
-        dst.pix[i + 0] = ((dr.to_u32 * a // MAX_COLOR_VALUE + sr) >> 8).to_u8
-        dst.pix[i + 1] = ((dg.to_u32 * a // MAX_COLOR_VALUE + sg) >> 8).to_u8
-        dst.pix[i + 2] = ((db.to_u32 * a // MAX_COLOR_VALUE + sb) >> 8).to_u8
-        dst.pix[i + 3] = ((da.to_u32 * a // MAX_COLOR_VALUE + sa) >> 8).to_u8
+        dst.pix[i + 0] = ((dr.to_u32 &* a &+ sr &* MAX_COLOR_VALUE) // MAX_COLOR_VALUE >> 8).to_u8
+        dst.pix[i + 1] = ((dg.to_u32 &* a &+ sg &* MAX_COLOR_VALUE) // MAX_COLOR_VALUE >> 8).to_u8
+        dst.pix[i + 2] = ((db.to_u32 &* a &+ sb &* MAX_COLOR_VALUE) // MAX_COLOR_VALUE >> 8).to_u8
+        dst.pix[i + 3] = ((da.to_u32 &* a &+ sa &* MAX_COLOR_VALUE) // MAX_COLOR_VALUE >> 8).to_u8
       end
       i0 += dst.stride
       i1 += dst.stride

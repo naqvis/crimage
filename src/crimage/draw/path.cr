@@ -671,7 +671,10 @@ module CrImage::Draw
           else
             color = gradient.stops.first.color
           end
-          img.set(x, y, color)
+          # Alpha blend with existing pixel
+          dst = img.at(x, y)
+          blended = blend_colors(color, dst, BlendMode::Normal)
+          img.set(x, y, blended)
         end
 
         i += 2
@@ -725,7 +728,10 @@ module CrImage::Draw
           distance = ::Math.sqrt(dx * dx + dy * dy)
           t = radius_f > 0 ? distance / radius_f : 0.0
           color = gradient.color_at(t)
-          img.set(x, y, color)
+          # Alpha blend with existing pixel
+          dst = img.at(x, y)
+          blended = blend_colors(color, dst, BlendMode::Normal)
+          img.set(x, y, blended)
         end
 
         i += 2
@@ -738,83 +744,6 @@ module CrImage::Draw
     points = path.flatten
     return if points.size < 3
     fill_polygon_gradient(img, points, gradient)
-  end
-
-  # BlendMode defines how colors are combined when drawing.
-  enum BlendMode
-    Normal    # Standard alpha compositing
-    Multiply  # Darkens: result = src * dst
-    Screen    # Lightens: result = 1 - (1-src) * (1-dst)
-    Overlay   # Combines multiply and screen
-    SoftLight # Gentle lighting effect
-  end
-
-  # Blends two colors using the specified blend mode.
-  def self.blend_colors(src : Color::Color, dst : Color::Color, mode : BlendMode) : Color::Color
-    sr, sg, sb, sa = src.rgba
-    dr, dg, db, da = dst.rgba
-
-    # Normalize to 0-1 range
-    sr_f = sr.to_f64 / Color::MAX_32BIT
-    sg_f = sg.to_f64 / Color::MAX_32BIT
-    sb_f = sb.to_f64 / Color::MAX_32BIT
-    sa_f = sa.to_f64 / Color::MAX_32BIT
-
-    dr_f = dr.to_f64 / Color::MAX_32BIT
-    dg_f = dg.to_f64 / Color::MAX_32BIT
-    db_f = db.to_f64 / Color::MAX_32BIT
-    da_f = da.to_f64 / Color::MAX_32BIT
-
-    rr, rg, rb = case mode
-                 when .normal?
-                   {sr_f, sg_f, sb_f}
-                 when .multiply?
-                   {sr_f * dr_f, sg_f * dg_f, sb_f * db_f}
-                 when .screen?
-                   {1.0 - (1.0 - sr_f) * (1.0 - dr_f),
-                    1.0 - (1.0 - sg_f) * (1.0 - dg_f),
-                    1.0 - (1.0 - sb_f) * (1.0 - db_f)}
-                 when .overlay?
-                   {overlay_channel(sr_f, dr_f),
-                    overlay_channel(sg_f, dg_f),
-                    overlay_channel(sb_f, db_f)}
-                 when .soft_light?
-                   {soft_light_channel(sr_f, dr_f),
-                    soft_light_channel(sg_f, dg_f),
-                    soft_light_channel(sb_f, db_f)}
-                 else
-                   {sr_f, sg_f, sb_f}
-                 end
-
-    # Apply source alpha for compositing
-    out_r = (rr * sa_f + dr_f * (1.0 - sa_f)).clamp(0.0, 1.0)
-    out_g = (rg * sa_f + dg_f * (1.0 - sa_f)).clamp(0.0, 1.0)
-    out_b = (rb * sa_f + db_f * (1.0 - sa_f)).clamp(0.0, 1.0)
-    out_a = (sa_f + da_f * (1.0 - sa_f)).clamp(0.0, 1.0)
-
-    Color::RGBA64.new(
-      (out_r * Color::MAX_16BIT).to_u16,
-      (out_g * Color::MAX_16BIT).to_u16,
-      (out_b * Color::MAX_16BIT).to_u16,
-      (out_a * Color::MAX_16BIT).to_u16
-    )
-  end
-
-  private def self.overlay_channel(src : Float64, dst : Float64) : Float64
-    if dst < 0.5
-      2.0 * src * dst
-    else
-      1.0 - 2.0 * (1.0 - src) * (1.0 - dst)
-    end
-  end
-
-  private def self.soft_light_channel(src : Float64, dst : Float64) : Float64
-    if src < 0.5
-      dst - (1.0 - 2.0 * src) * dst * (1.0 - dst)
-    else
-      d = dst < 0.25 ? ((16.0 * dst - 12.0) * dst + 4.0) * dst : ::Math.sqrt(dst)
-      dst + (2.0 * src - 1.0) * (d - dst)
-    end
   end
 
   # Fills a polygon with a color using the specified blend mode.

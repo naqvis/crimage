@@ -127,3 +127,42 @@ describe "RGBA methods" do
     red_lum.should be < 100
   end
 end
+
+describe "Color.to_rgba8" do
+  it "converts 16-bit color to 8-bit RGBA" do
+    color = CrImage::Color::RGBA64.new(0xFFFF_u16, 0x8000_u16, 0x0000_u16, 0xFFFF_u16)
+    rgba8 = color.to_rgba8
+
+    rgba8.r.should eq(255)
+    rgba8.g.should eq(128)
+    rgba8.b.should eq(0)
+    rgba8.a.should eq(255)
+  end
+
+  it "converts Gray16 to 8-bit RGBA" do
+    gray = CrImage::Color::Gray16.new(0x8080_u16)
+    rgba8 = gray.to_rgba8
+
+    rgba8.r.should eq(128)
+    rgba8.g.should eq(128)
+    rgba8.b.should eq(128)
+  end
+
+  it "works with standard colors" do
+    rgba8 = CrImage::Color::RED.to_rgba8
+    rgba8.r.should eq(255)
+    rgba8.g.should eq(0)
+    rgba8.b.should eq(0)
+    rgba8.a.should eq(255)
+  end
+
+  it "preserves 8-bit RGBA values" do
+    original = CrImage::Color::RGBA.new(100_u8, 150_u8, 200_u8, 250_u8)
+    rgba8 = original.to_rgba8
+
+    rgba8.r.should eq(100)
+    rgba8.g.should eq(150)
+    rgba8.b.should eq(200)
+    rgba8.a.should eq(250)
+  end
+end

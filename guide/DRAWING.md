@@ -40,6 +40,11 @@ img.draw_line(50, 100, 350, 200, color: CrImage::Color::GREEN, anti_alias: true)
 style = CrImage::Draw::LineStyle.new(CrImage::Color::RED, thickness: 5, anti_alias: true)
 CrImage::Draw.line(img, CrImage::Point.new(50, 150), CrImage::Point.new(350, 250), style)
 
+# Polyline - connected line segments through multiple points
+points = [CrImage.point(10, 10), CrImage.point(50, 80), CrImage.point(90, 20), CrImage.point(130, 60)]
+style = CrImage::Draw::LineStyle.new(CrImage::Color::BLUE, thickness: 2)
+CrImage::Draw.polyline(img, points, style)
+
 # Dashed line
 dash_style = CrImage::Draw::DashedLineStyle.new(
   CrImage::Color::RED,
@@ -72,6 +77,12 @@ CrImage::Draw.circle(img, CrImage::Point.new(200, 150), 50, circle_style)
 
 # Ellipse
 img.draw_ellipse(200, 150, 80, 50, color: CrImage::Color::GREEN, fill: true)
+
+# Circle with blend mode
+style = CrImage::Draw::CircleStyle.new(CrImage::Color.rgba(255, 0, 0, 200))
+  .with_fill(true)
+  .with_blend_mode(CrImage::Draw::BlendMode::Multiply)
+CrImage::Draw.circle(img, CrImage::Point.new(200, 150), 50, style)
 ```
 
 ## Rectangles
@@ -171,6 +182,11 @@ points = [
   CrImage::Point.new(350, 250),
 ]
 CrImage::Draw.spline(img, points, bezier_style, tension: 0.5)
+
+# Flatten spline to points (for fills, hit testing, clipping paths)
+control_points = [CrImage.point(10, 50), CrImage.point(50, 20), CrImage.point(90, 60)]
+curve_points = CrImage::Draw.spline_flatten(control_points, tension: 0.5)
+# curve_points is an Array(Point) of interpolated positions along the curve
 ```
 
 ## Paths (SVG-like)
@@ -334,23 +350,30 @@ Control how overlapping semi-transparent shapes combine:
 # - Overlay   : Combines multiply and screen
 # - SoftLight : Gentle lighting effect
 
-# Fill polygon with blend mode
-points = [...]
-color = CrImage::Color.rgba(255_u8, 0_u8, 0_u8, 180_u8)
+# Fill circle with blend mode
+style = CrImage::Draw::CircleStyle.new(CrImage::Color.rgba(255, 0, 0, 180))
+  .with_fill(true)
+  .with_blend_mode(CrImage::Draw::BlendMode::Multiply)
+CrImage::Draw.circle(img, CrImage.point(100, 100), 50, style)
+
+# Fill rectangle with blend mode
+rect_style = CrImage::Draw::RectStyle.new
+  .with_fill(CrImage::Color.rgba(0, 0, 255, 180))
+  .with_blend_mode(CrImage::Draw::BlendMode::Screen)
+CrImage::Draw.rectangle(img, CrImage.rect(50, 50, 150, 150), rect_style)
+
+# Fill polygon with blend mode (via style)
+poly_style = CrImage::Draw::PolygonStyle.new
+  .with_fill(CrImage::Color.rgba(0, 255, 0, 180))
+  .with_blend_mode(CrImage::Draw::BlendMode::Overlay)
+CrImage::Draw.polygon(img, points, poly_style)
+
+# Fill polygon with blend mode (direct function)
 CrImage::Draw.fill_polygon_blended(img, points, color, CrImage::Draw::BlendMode::Multiply)
 
 # Fill path with blend mode
 path = CrImage::Draw::Path.new.move_to(...)...
 CrImage::Draw.fill_path_blended(img, path, color, CrImage::Draw::BlendMode::Screen)
-
-# Overlapping shapes example
-# First shape
-CrImage::Draw.fill_polygon_blended(img, shape1, CrImage::Color.rgba(255, 0, 0, 200),
-  CrImage::Draw::BlendMode::Normal)
-
-# Second overlapping shape with multiply blend
-CrImage::Draw.fill_polygon_blended(img, shape2, CrImage::Color.rgba(0, 0, 255, 200),
-  CrImage::Draw::BlendMode::Multiply)
 ```
 
 ## Pattern Fills (Hatching)

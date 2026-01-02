@@ -3,6 +3,83 @@ require "../color"
 require "../geom"
 
 module CrImage::Draw
+  # BlendMode defines how colors are combined when drawing.
+  enum BlendMode
+    Normal    # Standard alpha compositing
+    Multiply  # Darkens: result = src * dst
+    Screen    # Lightens: result = 1 - (1-src) * (1-dst)
+    Overlay   # Combines multiply and screen
+    SoftLight # Gentle lighting effect
+  end
+
+  # Blends two colors using the specified blend mode.
+  def self.blend_colors(src : Color::Color, dst : Color::Color, mode : BlendMode) : Color::Color
+    sr, sg, sb, sa = src.rgba
+    dr, dg, db, da = dst.rgba
+
+    # Normalize to 0-1 range
+    sr_f = sr.to_f64 / Color::MAX_32BIT
+    sg_f = sg.to_f64 / Color::MAX_32BIT
+    sb_f = sb.to_f64 / Color::MAX_32BIT
+    sa_f = sa.to_f64 / Color::MAX_32BIT
+
+    dr_f = dr.to_f64 / Color::MAX_32BIT
+    dg_f = dg.to_f64 / Color::MAX_32BIT
+    db_f = db.to_f64 / Color::MAX_32BIT
+    da_f = da.to_f64 / Color::MAX_32BIT
+
+    rr, rg, rb = case mode
+                 when .normal?
+                   {sr_f, sg_f, sb_f}
+                 when .multiply?
+                   {sr_f * dr_f, sg_f * dg_f, sb_f * db_f}
+                 when .screen?
+                   {1.0 - (1.0 - sr_f) * (1.0 - dr_f),
+                    1.0 - (1.0 - sg_f) * (1.0 - dg_f),
+                    1.0 - (1.0 - sb_f) * (1.0 - db_f)}
+                 when .overlay?
+                   {overlay_channel(sr_f, dr_f),
+                    overlay_channel(sg_f, dg_f),
+                    overlay_channel(sb_f, db_f)}
+                 when .soft_light?
+                   {soft_light_channel(sr_f, dr_f),
+                    soft_light_channel(sg_f, dg_f),
+                    soft_light_channel(sb_f, db_f)}
+                 else
+                   {sr_f, sg_f, sb_f}
+                 end
+
+    # Apply source alpha for compositing
+    out_r = (rr * sa_f + dr_f * (1.0 - sa_f)).clamp(0.0, 1.0)
+    out_g = (rg * sa_f + dg_f * (1.0 - sa_f)).clamp(0.0, 1.0)
+    out_b = (rb * sa_f + db_f * (1.0 - sa_f)).clamp(0.0, 1.0)
+    out_a = (sa_f + da_f * (1.0 - sa_f)).clamp(0.0, 1.0)
+
+    Color::RGBA64.new(
+      (out_r * Color::MAX_16BIT).to_u16,
+      (out_g * Color::MAX_16BIT).to_u16,
+      (out_b * Color::MAX_16BIT).to_u16,
+      (out_a * Color::MAX_16BIT).to_u16
+    )
+  end
+
+  private def self.overlay_channel(src : Float64, dst : Float64) : Float64
+    if dst < 0.5
+      2.0 * src * dst
+    else
+      1.0 - 2.0 * (1.0 - src) * (1.0 - dst)
+    end
+  end
+
+  private def self.soft_light_channel(src : Float64, dst : Float64) : Float64
+    if src < 0.5
+      dst - (1.0 - 2.0 * src) * dst * (1.0 - dst)
+    else
+      d = dst < 0.25 ? ((16.0 * dst - 12.0) * dst + 4.0) * dst : ::Math.sqrt(dst)
+      dst + (2.0 * src - 1.0) * (d - dst)
+    end
+  end
+
   # LineStyle defines the visual appearance of a line.
   #
   # Properties:
@@ -390,8 +467,9 @@ module CrImage::Draw
     property fill : Bool
     property anti_alias : Bool
     property thickness : Int32
+    property blend_mode : BlendMode?
 
-    def initialize(@color, @fill = false, @anti_alias = false, @thickness = 1)
+    def initialize(@color, @fill = false, @anti_alias = false, @thickness = 1, @blend_mode = nil)
     end
 
     # Builder pattern methods for fluent API
@@ -412,6 +490,11 @@ module CrImage::Draw
 
     def with_thickness(thickness : Int32) : self
       @thickness = thickness
+      self
+    end
+
+    def with_blend_mode(mode : BlendMode) : self
+      @blend_mode = mode
       self
     end
 
@@ -447,7 +530,11 @@ module CrImage::Draw
     return if radius == 0
 
     if style.fill
-      filled_circle(img, center, radius, style.color, style.anti_alias)
+      if blend_mode = style.blend_mode
+        filled_circle_blended(img, center, radius, style.color, blend_mode)
+      else
+        filled_circle(img, center, radius, style.color, style.anti_alias)
+      end
     elsif style.thickness > 1
       thick_circle_outline(img, center, radius, style.color, style.thickness)
     else
@@ -558,6 +645,31 @@ module CrImage::Draw
           d += 2 * (x - y) + 1
         end
         fill_circle_scanline(img, cx, cy, x, y, color, bounds)
+      end
+    end
+  end
+
+  # Draw filled circle with blend mode
+  private def self.filled_circle_blended(img : Image, center : Point, radius : Int32, color : Color::Color, mode : BlendMode)
+    return if radius == 0
+
+    bounds = img.bounds
+    cx, cy = center.x, center.y
+
+    # Use simple scanline approach for blended circles
+    (-radius..radius).each do |dy|
+      y = cy + dy
+      next if y < bounds.min.y || y >= bounds.max.y
+
+      # Calculate x extent for this y
+      dx = ::Math.sqrt((radius * radius - dy * dy).to_f64).to_i
+      x_start = [cx - dx, bounds.min.x].max
+      x_end = [cx + dx, bounds.max.x - 1].min
+
+      (x_start..x_end).each do |x|
+        dst = img.at(x, y)
+        blended = blend_colors(color, dst, mode)
+        img.set(x, y, blended)
       end
     end
   end
@@ -846,8 +958,9 @@ module CrImage::Draw
     property outline_color : Color::Color?
     property fill_color : Color::Color?
     property anti_alias : Bool
+    property blend_mode : BlendMode?
 
-    def initialize(@outline_color = nil, @fill_color = nil, @anti_alias = false)
+    def initialize(@outline_color = nil, @fill_color = nil, @anti_alias = false, @blend_mode = nil)
     end
 
     # Builder pattern methods for fluent API
@@ -863,6 +976,11 @@ module CrImage::Draw
 
     def with_anti_alias(enabled : Bool = true) : self
       @anti_alias = enabled
+      self
+    end
+
+    def with_blend_mode(mode : BlendMode) : self
+      @blend_mode = mode
       self
     end
 
@@ -903,7 +1021,11 @@ module CrImage::Draw
 
     # Draw filled polygon first (if requested)
     if fill_color = style.fill_color
-      scanline_fill_polygon(img, points, fill_color)
+      if blend_mode = style.blend_mode
+        fill_polygon_blended(img, points, fill_color, blend_mode)
+      else
+        scanline_fill_polygon(img, points, fill_color)
+      end
     end
 
     # Draw outline (if requested)
@@ -986,8 +1108,9 @@ module CrImage::Draw
     property outline_color : Color::Color?
     property fill_color : Color::Color?
     property corner_radius : Int32
+    property blend_mode : BlendMode?
 
-    def initialize(@outline_color = nil, @fill_color = nil, @corner_radius = 0)
+    def initialize(@outline_color = nil, @fill_color = nil, @corner_radius = 0, @blend_mode = nil)
     end
 
     def with_outline(color : Color::Color) : self
@@ -1002,6 +1125,11 @@ module CrImage::Draw
 
     def with_corner_radius(radius : Int32) : self
       @corner_radius = radius
+      self
+    end
+
+    def with_blend_mode(mode : BlendMode) : self
+      @blend_mode = mode
       self
     end
 
@@ -1028,13 +1156,20 @@ module CrImage::Draw
 
   private def self.simple_rectangle(img : Image, rect : Rectangle, style : RectStyle)
     bounds = img.bounds
+    blend_mode = style.blend_mode
 
     if fill_color = style.fill_color
       (rect.min.y...rect.max.y).each do |y|
         next if y < bounds.min.y || y >= bounds.max.y
         (rect.min.x...rect.max.x).each do |x|
           next if x < bounds.min.x || x >= bounds.max.x
-          img.set(x, y, fill_color)
+          if blend_mode
+            dst = img.at(x, y)
+            blended = blend_colors(fill_color, dst, blend_mode)
+            img.set(x, y, blended)
+          else
+            img.set(x, y, fill_color)
+          end
         end
       end
     end
@@ -1060,6 +1195,7 @@ module CrImage::Draw
     radius = style.corner_radius
     width = rect.max.x - rect.min.x
     height = rect.max.y - rect.min.y
+    blend_mode = style.blend_mode
 
     # Clamp radius to half the smaller dimension
     radius = [radius, width // 2, height // 2].min
@@ -1075,7 +1211,13 @@ module CrImage::Draw
           local_y = y - rect.min.y
 
           if should_draw_rounded_pixel(local_x, local_y, width, height, radius)
-            img.set(x, y, fill_color)
+            if blend_mode
+              dst = img.at(x, y)
+              blended = blend_colors(fill_color, dst, blend_mode)
+              img.set(x, y, blended)
+            else
+              img.set(x, y, fill_color)
+            end
           end
         end
       end
@@ -1814,6 +1956,83 @@ module CrImage::Draw
         p2,
         style
       )
+    end
+  end
+
+  # Flattens a Catmull-Rom spline to an array of points.
+  #
+  # Useful for fills, clipping paths, hit testing, or any operation that needs
+  # the interpolated points without drawing.
+  #
+  # Parameters:
+  # - `points` : Control points the spline passes through
+  # - `tension` : Curve tension (0.0 = sharp corners, 1.0 = smooth)
+  # - `segments_per_span` : Number of line segments per curve span (default: 16)
+  #
+  # Returns: Array of interpolated points along the spline
+  #
+  # Example:
+  # ```
+  # control_points = [CrImage.point(10, 50), CrImage.point(50, 20), CrImage.point(90, 60)]
+  # curve_points = CrImage::Draw.spline_flatten(control_points, tension: 0.5)
+  # # Use curve_points for fills, hit testing, etc.
+  # ```
+  def self.spline_flatten(points : Array(Point), tension : Float64 = 0.5, segments_per_span : Int32 = 16) : Array(Point)
+    return [] of Point if points.size < 2
+    return points.dup if points.size == 2
+
+    result = [] of Point
+
+    (0...points.size - 1).each do |i|
+      p0 = points[[i - 1, 0].max]
+      p1 = points[i]
+      p2 = points[i + 1]
+      p3 = points[[i + 2, points.size - 1].min]
+
+      # Calculate control points using Catmull-Rom to Bezier conversion
+      cp1_x = p1.x + (p2.x - p0.x) * tension / 3
+      cp1_y = p1.y + (p2.y - p0.y) * tension / 3
+      cp2_x = p2.x - (p3.x - p1.x) * tension / 3
+      cp2_y = p2.y - (p3.y - p1.y) * tension / 3
+
+      # Sample this segment
+      start_t = i == 0 ? 0 : 1
+      (start_t..segments_per_span).each do |j|
+        t = j.to_f64 / segments_per_span
+        inv_t = 1.0 - t
+        inv_t_sq = inv_t * inv_t
+        inv_t_cu = inv_t_sq * inv_t
+        t_sq = t * t
+        t_cu = t_sq * t
+
+        x = inv_t_cu * p1.x + 3 * inv_t_sq * t * cp1_x + 3 * inv_t * t_sq * cp2_x + t_cu * p2.x
+        y = inv_t_cu * p1.y + 3 * inv_t_sq * t * cp1_y + 3 * inv_t * t_sq * cp2_y + t_cu * p2.y
+
+        result << Point.new(x.round.to_i, y.round.to_i)
+      end
+    end
+
+    result
+  end
+
+  # Draws connected line segments through an array of points.
+  #
+  # Parameters:
+  # - `img` : The image to draw on
+  # - `points` : Array of points to connect
+  # - `style` : Line appearance settings
+  #
+  # Example:
+  # ```
+  # points = [CrImage.point(10, 10), CrImage.point(50, 30), CrImage.point(90, 20)]
+  # style = CrImage::Draw::LineStyle.new(CrImage::Color::BLUE, thickness: 2)
+  # CrImage::Draw.polyline(img, points, style)
+  # ```
+  def self.polyline(img : Image, points : Array(Point), style : LineStyle)
+    return if points.size < 2
+
+    (0...points.size - 1).each do |i|
+      line(img, points[i], points[i + 1], style)
     end
   end
 

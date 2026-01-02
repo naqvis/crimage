@@ -299,6 +299,10 @@ semi_transparent = color.with_alpha(128)
 
 # Convert to hex
 hex = color.to_hex  # "#FF0000FF"
+
+# Convert any color to 8-bit RGBA
+# Useful when working with 16-bit colors (RGBA64, Gray16, etc.)
+rgba8 = color.to_rgba8  # Returns RGBA with 8-bit components
 ```
 
 ### Image Color Model Conversion
