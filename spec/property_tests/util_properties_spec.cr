@@ -1,19 +1,19 @@
 require "../spec_helper"
 
 # Helper methods for property tests
-def random_image(min_width = 5, max_width = 100, min_height = 5, max_height = 100, rng = Random::DEFAULT)
-  width = rng.rand(min_width..max_width)
-  height = rng.rand(min_height..max_height)
+def random_image(min_width = 5, max_width = 100, min_height = 5, max_height = 100)
+  width = Random.rand(min_width..max_width)
+  height = Random.rand(min_height..max_height)
   img = CrImage::RGBA.new(CrImage.rect(0, 0, width, height))
 
   # Fill with random colors
   height.times do |y|
     width.times do |x|
       img.set(x, y, CrImage::Color::RGBA.new(
-        rng.rand(256).to_u8,
-        rng.rand(256).to_u8,
-        rng.rand(256).to_u8,
-        rng.rand(256).to_u8
+        Random.rand(256).to_u8,
+        Random.rand(256).to_u8,
+        Random.rand(256).to_u8,
+        Random.rand(256).to_u8
       ))
     end
   end
@@ -197,7 +197,9 @@ module CrImage::Util
         # Use fixed seed for reproducibility across CI environments
         rng = Random.new(42)
         10.times do
-          img = random_image(20, 200, 20, 200, rng)
+          width = rng.rand(20..200)
+          height = rng.rand(20..200)
+          img = CrImage::RGBA.new(CrImage.rect(0, 0, width, height))
 
           src_width = img.bounds.width.to_f
           src_height = img.bounds.height.to_f
