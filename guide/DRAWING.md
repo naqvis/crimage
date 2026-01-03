@@ -24,6 +24,45 @@ checker = CrImage.checkerboard(400, 300, cell_size: 16)
 gradient = CrImage.gradient(400, 300, CrImage::Color::RED, CrImage::Color::BLUE, :horizontal)
 ```
 
+## Buffer Interop (Video/GPU/Realtime)
+
+For integrating with video streams, GPU textures, or screen framebuffers:
+
+```crystal
+# Create image from existing buffer (zero-copy, wraps buffer directly)
+buffer = Bytes.new(1920 * 1080 * 4)  # Your buffer from video/GPU/etc
+img = CrImage::RGBA.from_buffer(buffer, 1920, 1080)
+
+# Draw directly to the buffer
+img.draw_circle(960, 540, 100, color: CrImage::Color::RED, fill: true)
+# buffer now contains the drawn circle - no copy needed
+
+# Hot-swap to different buffer (zero allocation)
+next_frame = Bytes.new(1920 * 1080 * 4)
+img.swap_buffer(next_frame)
+# img now operates on next_frame
+
+# Access raw pixel data
+raw = img.pix  # Returns Bytes, same reference as buffer
+```
+
+### Pixel Layout
+
+CrImage uses the following byte layout:
+
+| Type   | Bytes/Pixel | Layout                               |
+| ------ | ----------- | ------------------------------------ |
+| RGBA   | 4           | `[R, G, B, A]` (byte 0 = Red)        |
+| NRGBA  | 4           | `[R, G, B, A]` non-premultiplied     |
+| Gray   | 1           | `[Y]`                                |
+| Gray16 | 2           | `[Y_hi, Y_lo]` big-endian            |
+| RGBA64 | 8           | `[R_hi, R_lo, G_hi, ...]` big-endian |
+
+- Row-major order (pixels left-to-right, rows top-to-bottom)
+- Stride = width × bytes_per_pixel (no padding)
+- Compatible with: OpenGL `GL_RGBA`, Vulkan `VK_FORMAT_R8G8B8A8_UNORM`, SDL `SDL_PIXELFORMAT_RGBA32`
+- For BGRA APIs (Windows GDI, some DirectX): manual channel swap needed
+
 ## Lines
 
 ```crystal

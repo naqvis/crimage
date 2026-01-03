@@ -207,6 +207,85 @@ module CrImage
       end
     end
 
+    describe "from_buffer" do
+      it "creates RGBA image from buffer" do
+        # 2x2 RGBA image = 16 bytes
+        buffer = Bytes.new(16)
+        # Set first pixel to red
+        buffer[0] = 255_u8 # R
+        buffer[1] = 0_u8   # G
+        buffer[2] = 0_u8   # B
+        buffer[3] = 255_u8 # A
+
+        img = RGBA.from_buffer(buffer, 2, 2)
+
+        img.bounds.width.should eq(2)
+        img.bounds.height.should eq(2)
+
+        pixel = img.rgba_at(0, 0)
+        pixel.r.should eq(255)
+        pixel.g.should eq(0)
+        pixel.b.should eq(0)
+        pixel.a.should eq(255)
+      end
+
+      it "creates Gray image from buffer" do
+        buffer = Bytes.new(4)
+        buffer[0] = 128_u8
+
+        img = Gray.from_buffer(buffer, 2, 2)
+
+        img.bounds.width.should eq(2)
+        pixel = img.gray_at(0, 0)
+        pixel.y.should eq(128)
+      end
+
+      it "raises on buffer too small" do
+        buffer = Bytes.new(10) # Too small for 10x10 RGBA
+
+        expect_raises(ArgumentError, /Buffer too small/) do
+          RGBA.from_buffer(buffer, 10, 10)
+        end
+      end
+
+      it "shares buffer with image (no copy)" do
+        buffer = Bytes.new(16)
+        img = RGBA.from_buffer(buffer, 2, 2)
+
+        # Modify buffer directly
+        buffer[0] = 200_u8
+
+        # Image should reflect change
+        pixel = img.rgba_at(0, 0)
+        pixel.r.should eq(200)
+      end
+
+      it "swaps buffer without allocation" do
+        buffer1 = Bytes.new(16)
+        buffer1[0] = 100_u8
+
+        buffer2 = Bytes.new(16)
+        buffer2[0] = 200_u8
+
+        img = RGBA.from_buffer(buffer1, 2, 2)
+        img.rgba_at(0, 0).r.should eq(100)
+
+        img.swap_buffer(buffer2)
+        img.rgba_at(0, 0).r.should eq(200)
+      end
+
+      it "raises on swap_buffer size mismatch" do
+        buffer1 = Bytes.new(16)
+        buffer2 = Bytes.new(4) # Too small
+
+        img = RGBA.from_buffer(buffer1, 2, 2)
+
+        expect_raises(ArgumentError, /Buffer too small/) do
+          img.swap_buffer(buffer2)
+        end
+      end
+    end
+
     describe "RGBA64 Image" do
       it "creates RGBA64 image" do
         img = RGBA64.new(rect(0, 0, 10, 10))

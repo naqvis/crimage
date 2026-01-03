@@ -23,6 +23,59 @@ module CrImage
         @rect = r
       end
 
+      # Creates an image from an existing pixel buffer.
+      #
+      # Convenience constructor that calculates stride automatically.
+      # The buffer is used directly (not copied), so modifications to the
+      # image will affect the original buffer.
+      #
+      # Parameters:
+      # - `buffer` : Raw pixel data in row-major order
+      # - `width` : Image width in pixels
+      # - `height` : Image height in pixels
+      #
+      # Raises: `ArgumentError` if buffer size doesn't match expected size
+      #
+      # Example:
+      # ```
+      # # Create 100x100 RGBA image from raw bytes
+      # pixels = Bytes.new(100 * 100 * 4)
+      # img = CrImage::RGBA.from_buffer(pixels, 100, 100)
+      # ```
+      def self.from_buffer(buffer : Bytes, width : Int32, height : Int32) : self
+        expected_size = width * height * {{bytes_per_pixel}}
+        if buffer.size < expected_size
+          raise ArgumentError.new("Buffer too small: got #{buffer.size} bytes, need #{expected_size} for #{width}x#{height} image")
+        end
+        stride = width * {{bytes_per_pixel}}
+        new(buffer, stride, CrImage.rect(0, 0, width, height))
+      end
+
+      # Swaps the underlying pixel buffer without allocation.
+      #
+      # Useful for video/realtime processing where you want to reuse
+      # an image object with different frame data.
+      #
+      # Parameters:
+      # - `buffer` : New pixel buffer (must match current dimensions)
+      #
+      # Raises: `ArgumentError` if buffer size doesn't match
+      #
+      # Example:
+      # ```
+      # img = CrImage::RGBA.from_buffer(frame1, 1920, 1080)
+      # process(img)
+      # img.swap_buffer(frame2)  # Zero allocation
+      # process(img)
+      # ```
+      def swap_buffer(buffer : Bytes) : Nil
+        expected_size = @rect.width * @rect.height * {{bytes_per_pixel}}
+        if buffer.size < expected_size
+          raise ArgumentError.new("Buffer too small: got #{buffer.size} bytes, need #{expected_size}")
+        end
+        @pix = buffer
+      end
+
       def color_model : Color::Model
         Color.{{model_method.id}}
       end
