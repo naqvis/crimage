@@ -399,7 +399,7 @@ module FreeType::TrueType
       num_contours = read_i16(offset)
 
       glyph = GlyphData.new
-      glyph.num_contours = num_contours
+      glyph.num_contours = num_contours.to_i
       glyph.x_min = read_i16(offset + 2)
       glyph.y_min = read_i16(offset + 4)
       glyph.x_max = read_i16(offset + 6)
@@ -889,7 +889,7 @@ module FreeType::TrueType
         glyph_count.times do |i|
           break if offset + 4 + i * 2 + 2 > @data.size
           glyph_id = read_u16(offset + 4 + i * 2)
-          coverage[glyph_id] = i
+          coverage[glyph_id] = i.to_i
         end
       when 2
         # Coverage Format 2: ranges
@@ -903,7 +903,7 @@ module FreeType::TrueType
           start_coverage_index = read_u16(range_offset + 4)
 
           (start_glyph..end_glyph).each_with_index do |glyph, j|
-            coverage[glyph.to_u16] = start_coverage_index.to_i + j
+            coverage[glyph.to_u16] = start_coverage_index.to_i + j.to_i
           end
         end
       end

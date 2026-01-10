@@ -208,7 +208,7 @@ module FreeType::Info
         next if str_offset + length > data.size
 
         # Extract string based on platform/encoding
-        str = extract_string(data, str_offset, length, platform_id, encoding_id)
+        str = extract_string(data, str_offset, length.to_i, platform_id, encoding_id)
         next if str.empty?
 
         # Store in appropriate field

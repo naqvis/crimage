@@ -187,7 +187,7 @@ module CrImage::ICO
             elsif bit_count == 24
               read_24bit_data(width, height)
             elsif bit_count <= 8 && palette
-              read_paletted_data(width, height, bit_count, palette)
+              read_paletted_data(width, height, bit_count.to_i, palette)
             else
               raise FormatError.new("Unsupported bit depth: #{bit_count}")
             end
