@@ -44,11 +44,12 @@ module CrImage
       #
       # Parameters:
       # - text: The text to display in the CAPTCHA
-      # - font_path: Path to TrueType font file
+      # - font_path: Path to TrueType font file (.ttf, .otf, .ttc)
       # - options: CAPTCHA generation options (optional)
+      # - font_index: Font index for TrueType Collection (.ttc) files (default: 0)
       #
       # Returns: RGBA image containing the CAPTCHA
-      def self.generate(text : String, font_path : String, options : Options = Options.new) : RGBA
+      def self.generate(text : String, font_path : String, options : Options = Options.new, font_index : Int32 = 0) : RGBA
         raise ArgumentError.new("Text cannot be empty") if text.empty?
         raise ArgumentError.new("Font file not found: #{font_path}") unless File.exists?(font_path)
 
@@ -58,8 +59,8 @@ module CrImage
         # Add background noise
         image = image.add_noise(0.05, NoiseType::Gaussian, monochrome: true)
 
-        # Load font
-        font = FreeType::TrueType.load(font_path)
+        # Load font (supports TTC files)
+        font = load_font(font_path, font_index)
         font_size = options.height * 0.6
         face = FreeType::TrueType.new_face(font, font_size)
 
@@ -88,6 +89,19 @@ module CrImage
       def self.random_text(length : Int32 = 6, charset : String = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789") : String
         String.build do |str|
           length.times { str << charset[rand(charset.size)] }
+        end
+      end
+
+      # Load font from path, supporting both single fonts and TTC collections
+      private def self.load_font(font_path : String, font_index : Int32) : FreeType::TrueType::Font
+        # Try loading as TTC first
+        collection = FreeType::TrueType.load_collection(font_path)
+        if collection.is_collection?
+          raise ArgumentError.new("Font index #{font_index} out of range (0-#{collection.num_fonts - 1})") if font_index >= collection.num_fonts
+          collection.font(font_index)
+        else
+          # Single font file, ignore font_index
+          collection.font(0)
         end
       end
 
