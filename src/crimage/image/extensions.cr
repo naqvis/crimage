@@ -385,6 +385,21 @@ module CrImage
       draw_line(from[0], from[1], to[0], to[1], color, thickness, anti_alias)
     end
 
+    # Draws a line using Point objects.
+    #
+    # Example:
+    # ```
+    # p1 = CrImage::Point.new(10, 10)
+    # p2 = CrImage::Point.new(100, 100)
+    # img.draw_line(p1, p2, color: CrImage::Color::GREEN)
+    # ```
+    def draw_line(from : Point, to : Point,
+                  color : Color::Color = Color::BLACK,
+                  thickness : Int32 = 1,
+                  anti_alias : Bool = false) : self
+      draw_line(from.x, from.y, to.x, to.y, color, thickness, anti_alias)
+    end
+
     # Draws a circle on the image.
     #
     # Parameters:
@@ -405,6 +420,20 @@ module CrImage
       style = Draw::CircleStyle.new(color, fill, anti_alias)
       Draw.circle(self, Point.new(x, y), radius, style)
       self
+    end
+
+    # Draws a circle using a Point object.
+    #
+    # Example:
+    # ```
+    # center = CrImage::Point.new(200, 150)
+    # img.draw_circle(center, 50, color: CrImage::Color::RED, fill: true)
+    # ```
+    def draw_circle(center : Point, radius : Int32,
+                    color : Color::Color = Color::BLACK,
+                    fill : Bool = false,
+                    anti_alias : Bool = false) : self
+      draw_circle(center.x, center.y, radius, color, fill, anti_alias)
     end
 
     # Draws an ellipse on the image.
@@ -428,6 +457,20 @@ module CrImage
       style = Draw::CircleStyle.new(color, fill, anti_alias)
       Draw.ellipse(self, Point.new(x, y), rx, ry, style)
       self
+    end
+
+    # Draws an ellipse using a Point object.
+    #
+    # Example:
+    # ```
+    # center = CrImage::Point.new(200, 150)
+    # img.draw_ellipse(center, 80, 40, color: CrImage::Color::BLUE, fill: true)
+    # ```
+    def draw_ellipse(center : Point, rx : Int32, ry : Int32,
+                     color : Color::Color = Color::BLACK,
+                     fill : Bool = false,
+                     anti_alias : Bool = false) : self
+      draw_ellipse(center.x, center.y, rx, ry, color, fill, anti_alias)
     end
 
     # Draws a rectangle on the image.
@@ -472,6 +515,20 @@ module CrImage
       end
 
       self
+    end
+
+    # Draws a rectangle using a Point object.
+    #
+    # Example:
+    # ```
+    # top_left = CrImage::Point.new(10, 10)
+    # img.draw_rect(top_left, 100, 50, stroke: CrImage::Color::BLACK, fill: CrImage::Color::WHITE)
+    # ```
+    def draw_rect(top_left : Point, width : Int32, height : Int32,
+                  stroke : Color::Color? = nil,
+                  fill : Color::Color? = nil,
+                  anti_alias : Bool = false) : self
+      draw_rect(top_left.x, top_left.y, width, height, stroke, fill, anti_alias)
     end
 
     # Draws a polygon on the image.
