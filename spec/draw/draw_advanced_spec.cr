@@ -550,9 +550,9 @@ module CrImage
         img = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         p1 = Point.new(10, 10)
         p2 = Point.new(90, 90)
-        
+
         img.draw_line(p1, p2, color: CrImage::Color::RED, thickness: 2)
-        
+
         pixel = img.at(50, 50)
         r, g, b, a = pixel.rgba
         (r >> 8).should eq 255
@@ -565,13 +565,13 @@ module CrImage
         img1 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         img2 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         img3 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
-        
+
         color = CrImage::Color::RGBA.new(128_u8, 64_u8, 192_u8, 255_u8)
-        
+
         img1.draw_line(Point.new(20, 30), Point.new(80, 70), color: color, thickness: 3)
         img2.draw_line(20, 30, 80, 70, color: color, thickness: 3)
         img3.draw_line({20, 30}, {80, 70}, color: color, thickness: 3)
-        
+
         img1.at(50, 50).should eq img2.at(50, 50)
         img2.at(50, 50).should eq img3.at(50, 50)
       end
@@ -581,9 +581,9 @@ module CrImage
       it "draws circle using Point object" do
         img = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         center = Point.new(50, 50)
-        
+
         img.draw_circle(center, 20, color: CrImage::Color::RED, fill: true)
-        
+
         pixel = img.at(50, 50)
         r, g, b, _ = pixel.rgba
         (r >> 8).should eq 255
@@ -594,12 +594,12 @@ module CrImage
       it "produces same result for Point and coordinate formats" do
         img1 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         img2 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
-        
+
         color = CrImage::Color::RGBA.new(100_u8, 150_u8, 200_u8, 255_u8)
-        
+
         img1.draw_circle(Point.new(50, 50), 25, color: color, fill: true)
         img2.draw_circle(50, 50, 25, color: color, fill: true)
-        
+
         img1.at(50, 50).should eq img2.at(50, 50)
       end
     end
@@ -608,9 +608,9 @@ module CrImage
       it "draws ellipse using Point object" do
         img = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         center = Point.new(50, 50)
-        
+
         img.draw_ellipse(center, 30, 20, color: CrImage::Color::GREEN, fill: true)
-        
+
         pixel = img.at(50, 50)
         r, g, b, _ = pixel.rgba
         (r >> 8).should eq 0
@@ -621,12 +621,12 @@ module CrImage
       it "produces same result for Point and coordinate formats" do
         img1 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         img2 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
-        
+
         color = CrImage::Color::RGBA.new(200_u8, 100_u8, 50_u8, 255_u8)
-        
+
         img1.draw_ellipse(Point.new(50, 50), 35, 25, color: color, fill: true)
         img2.draw_ellipse(50, 50, 35, 25, color: color, fill: true)
-        
+
         img1.at(50, 50).should eq img2.at(50, 50)
       end
     end
@@ -635,9 +635,9 @@ module CrImage
       it "draws rectangle using Point object" do
         img = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         top_left = Point.new(20, 20)
-        
+
         img.draw_rect(top_left, 40, 30, fill: CrImage::Color::RED)
-        
+
         pixel = img.at(40, 35)
         r, g, b, _ = pixel.rgba
         (r >> 8).should eq 255
@@ -648,27 +648,27 @@ module CrImage
       it "produces same result for Point and coordinate formats" do
         img1 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         img2 = CrImage.rgba(100, 100, CrImage::Color::WHITE)
-        
+
         color = CrImage::Color::RGBA.new(150_u8, 200_u8, 100_u8, 255_u8)
-        
+
         img1.draw_rect(Point.new(10, 15), 50, 40, fill: color)
         img2.draw_rect(10, 15, 50, 40, fill: color)
-        
+
         img1.at(35, 35).should eq img2.at(35, 35)
       end
 
       it "draws rectangle with stroke using Point object" do
         img = CrImage.rgba(100, 100, CrImage::Color::WHITE)
         top_left = Point.new(20, 20)
-        
+
         img.draw_rect(top_left, 40, 30, stroke: CrImage::Color::BLACK, fill: CrImage::Color::YELLOW)
-        
+
         pixel_edge = img.at(20, 20)
         r, g, b, _ = pixel_edge.rgba
         (r >> 8).should eq 0
         (g >> 8).should eq 0
         (b >> 8).should eq 0
-        
+
         pixel_center = img.at(40, 35)
         r, g, b, _ = pixel_center.rgba
         (r >> 8).should eq 255
@@ -680,7 +680,7 @@ module CrImage
     describe "real-world use case: polyline with Point objects" do
       it "allows drawing line segments from collected Points" do
         img = CrImage.rgba(200, 200, CrImage::Color::WHITE)
-        
+
         points = [
           Point.new(10, 10),
           Point.new(50, 100),
@@ -688,11 +688,11 @@ module CrImage
           Point.new(150, 150),
           Point.new(190, 10),
         ]
-        
+
         (0...points.size - 1).each do |i|
           img.draw_line(points[i], points[i + 1], color: CrImage::Color::BLUE, thickness: 2)
         end
-        
+
         pixel1 = img.at(30, 55)
         r, g, b, _ = pixel1.rgba
         b8 = (b >> 8)
