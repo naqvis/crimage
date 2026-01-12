@@ -67,7 +67,7 @@ module CrImage::GIF
       ]
       palette = Color::Palette.new(colors)
       img = CrImage::Paletted.new(CrImage.rect(0, 0, 10, 10), palette)
-      path = "/tmp/test_gif_write.gif"
+      path = File.tempname("test_gif_write", ".gif")
 
       GIF.write(path, img)
 

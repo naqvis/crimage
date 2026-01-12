@@ -42,7 +42,7 @@ module CrImage::BMP
 
     it "writes to file" do
       img = CrImage::RGBA.new(CrImage.rect(0, 0, 10, 10))
-      path = "/tmp/test_bmp_write.bmp"
+      path = File.tempname("test_bmp_write", ".bmp")
 
       BMP.write(path, img)
 

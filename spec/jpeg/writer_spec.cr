@@ -80,7 +80,7 @@ describe CrImage::JPEG::Writer do
       rect = CrImage.rect(0, 0, 8, 8)
       img = CrImage::Gray.new(rect)
 
-      path = "/tmp/test_jpeg_write.jpg"
+      path = File.tempname("test_jpeg_write", ".jpg")
       CrImage::JPEG.write(path, img, 75)
 
       # Verify file exists and has content

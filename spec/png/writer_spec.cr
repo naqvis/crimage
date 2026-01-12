@@ -55,7 +55,7 @@ module CrImage::PNG
 
     it "writes to file" do
       img = CrImage::RGBA.new(CrImage.rect(0, 0, 10, 10))
-      path = "/tmp/test_png_write.png"
+      path = File.tempname("test_png_write", ".png")
 
       PNG.write(path, img)
 
