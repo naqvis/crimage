@@ -31,9 +31,9 @@ module CrImage::GIF
       @overflow : UInt16
       @last : UInt16
 
-      @suffix : StaticArray(UInt8, 4096)
-      @prefix : StaticArray(UInt16, 4096)
-      @output : StaticArray(UInt8, 8192)
+      @suffix : Slice(UInt8)
+      @prefix : Slice(UInt16)
+      @output : Slice(UInt8)
       @o : Int32
 
       def initialize(@r : Bytes, @lit_width : Int32)
@@ -48,9 +48,9 @@ module CrImage::GIF
         @overflow = (1_u16 << @width)
         @last = DECODER_INVALID_CODE
 
-        @suffix = StaticArray(UInt8, 4096).new(0_u8)
-        @prefix = StaticArray(UInt16, 4096).new(0_u16)
-        @output = StaticArray(UInt8, 8192).new(0_u8)
+        @suffix = Slice(UInt8).new(4096, 0_u8)
+        @prefix = Slice(UInt16).new(4096, 0_u16)
+        @output = Slice(UInt8).new(8192, 0_u8)
         @o = 0
       end
 
@@ -185,7 +185,7 @@ module CrImage::GIF
       @hi : UInt32
       @overflow : UInt32
       @saved_code : UInt32
-      @table : StaticArray(UInt32, TABLE_SIZE)
+      @table : Slice(UInt32)
       @output : IO::Memory
 
       def initialize(lit_width : Int32)
@@ -196,7 +196,7 @@ module CrImage::GIF
         @hi = (1_u32 << @lit_width) + 1_u32
         @overflow = 1_u32 << (@lit_width + 1_u32)
         @saved_code = INVALID_CODE
-        @table = StaticArray(UInt32, TABLE_SIZE).new(INVALID_ENTRY)
+        @table = Slice(UInt32).new(TABLE_SIZE, INVALID_ENTRY)
         @output = IO::Memory.new
       end
 

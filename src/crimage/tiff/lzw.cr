@@ -28,9 +28,9 @@ module CrImage::TIFF
       @overflow : UInt16
       @last : UInt16
 
-      @suffix : StaticArray(UInt8, 4096)
-      @prefix : StaticArray(UInt16, 4096)
-      @output : StaticArray(UInt8, 8192)
+      @suffix : Slice(UInt8)
+      @prefix : Slice(UInt16)
+      @output : Slice(UInt8)
       @o : Int32
 
       INVALID_CODE = 0xffff_u16
@@ -47,9 +47,9 @@ module CrImage::TIFF
         @overflow = (1_u16 << @width)
         @last = INVALID_CODE
 
-        @suffix = StaticArray(UInt8, 4096).new(0_u8)
-        @prefix = StaticArray(UInt16, 4096).new(0_u16)
-        @output = StaticArray(UInt8, 8192).new(0_u8)
+        @suffix = Slice(UInt8).new(4096, 0_u8)
+        @prefix = Slice(UInt16).new(4096, 0_u16)
+        @output = Slice(UInt8).new(8192, 0_u8)
         @o = 0
       end
 

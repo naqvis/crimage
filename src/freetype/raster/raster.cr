@@ -52,7 +52,6 @@ module FreeType::Raster
       # Linked list of cells, one per row.
       @cell_index = Array(Int32).new
       # buffers
-      @cell_buf = StaticArray(Cell, 256).new(Cell.new) # uninitialized Cell[256]
       @cell_index_buf = uninitialized Int32[64]
       @span_buf = StaticArray(Span, 64).new(Span.new)
     end
