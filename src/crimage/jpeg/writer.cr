@@ -7,12 +7,14 @@ module CrImage::JPEG
     @quant_tables : Array(QuantTable)
     @dc_tables : Array(HuffmanTable)
     @ac_tables : Array(HuffmanTable)
-    @y_data : Array(UInt8)?
-    @cb_data : Array(UInt8)?
-    @cr_data : Array(UInt8)?
+    @y_data : Bytes?
+    @cb_data : Bytes?
+    @cr_data : Bytes?
     @width : Int32
     @height : Int32
     @num_components : Int32
+    @block_buf : Array(Int32)
+    @dct_buf : Array(Int32)
 
     private def initialize(@io : IO, @image : CrImage::Image, @quality : Int32)
       @quant_tables = [] of QuantTable
@@ -24,11 +26,13 @@ module CrImage::JPEG
       @width = @image.bounds.width
       @height = @image.bounds.height
       @num_components = 0
+      @block_buf = Array(Int32).new(64, 0)
+      @dct_buf = Array(Int32).new(64, 0)
     end
 
     # Write JPEG image to file path
     def self.write(path : String, image : CrImage::Image, quality : Int32 = 75) : Nil
-      File.open(path, "w") do |file|
+      File.open(path, "wb") do |file|
         write(file, image, quality)
       end
     rescue ex : IO::Error
@@ -49,6 +53,7 @@ module CrImage::JPEG
     protected def encode : Nil
       # Validate quality parameter
       validate_quality
+      validate_dimensions
 
       # Convert image to YCbCr color space
       prepare_color_data
@@ -78,6 +83,15 @@ module CrImage::JPEG
     private def validate_quality : Nil
       unless @quality >= 1 && @quality <= 100
         raise FormatError.new("Quality must be between 1 and 100, got #{@quality}")
+      end
+    end
+
+    private def validate_dimensions : Nil
+      unless @width > 0 && @height > 0
+        raise FormatError.new("JPEG dimensions must be positive, got #{@width}x#{@height}")
+      end
+      if @width > UInt16::MAX || @height > UInt16::MAX
+        raise FormatError.new("Baseline JPEG supports dimensions up to #{UInt16::MAX}, got #{@width}x#{@height}")
       end
     end
 
@@ -320,17 +334,29 @@ module CrImage::JPEG
       height = bounds.height
 
       # Check if image is grayscale
-      if @image.is_a?(CrImage::Gray) || @image.is_a?(CrImage::Gray16)
+      if gray = @image.as?(CrImage::Gray)
         # Grayscale image - single component
         @num_components = 1
-        @y_data = Array(UInt8).new(width * height, 0_u8)
+        @y_data = Bytes.new(width * height, 0_u8)
+
+        y_data = @y_data.not_nil!
+        src_offset = 0
+
+        height.times do |y|
+          dst_offset = y * width
+          y_data[dst_offset, width].copy_from(gray.pix.to_unsafe + src_offset, width)
+          src_offset += gray.stride
+        end
+      elsif @image.is_a?(CrImage::Gray16)
+        # Grayscale image - single component
+        @num_components = 1
+        @y_data = Bytes.new(width * height, 0_u8)
 
         y_data = @y_data.not_nil!
 
         height.times do |y|
           width.times do |x|
             color = @image.at(x, y)
-            # Convert to Gray model
             gray_color = CrImage::Color.gray_model.convert(color).as(CrImage::Color::Gray)
             y_data[y * width + x] = gray_color.y
           end
@@ -341,44 +367,80 @@ module CrImage::JPEG
 
         # Allocate arrays for Y, Cb, Cr components
         # Apply 4:2:0 chroma subsampling
-        @y_data = Array(UInt8).new(width * height, 0_u8)
+        @y_data = Bytes.new(width * height, 0_u8)
 
         # Subsampled dimensions for Cb and Cr (half resolution)
         cb_width = (width + 1) // 2
         cb_height = (height + 1) // 2
-        @cb_data = Array(UInt8).new(cb_width * cb_height, 128_u8)
-        @cr_data = Array(UInt8).new(cb_width * cb_height, 128_u8)
+        @cb_data = Bytes.new(cb_width * cb_height, 128_u8)
+        @cr_data = Bytes.new(cb_width * cb_height, 128_u8)
+        cb_sums = Array(Int32).new(cb_width * cb_height, 0)
+        cr_sums = Array(Int32).new(cb_width * cb_height, 0)
+        sample_counts = Array(Int32).new(cb_width * cb_height, 0)
 
         y_data = @y_data.not_nil!
         cb_data = @cb_data.not_nil!
         cr_data = @cr_data.not_nil!
 
-        # Convert each pixel to YCbCr
-        height.times do |y|
-          width.times do |x|
-            color = @image.at(x, y)
+        if rgba = @image.as?(CrImage::RGBA)
+          convert_rgba_like_to_ycbcr(rgba.pix, rgba.stride, width, height, cb_width, y_data, cb_sums, cr_sums, sample_counts)
+        elsif nrgba = @image.as?(CrImage::NRGBA)
+          convert_rgba_like_to_ycbcr(nrgba.pix, nrgba.stride, width, height, cb_width, y_data, cb_sums, cr_sums, sample_counts)
+        else
+          # Convert each pixel to YCbCr
+          height.times do |y|
+            width.times do |x|
+              color = @image.at(x, y)
 
-            # Get RGB values
-            r32, g32, b32, _ = color.rgba
-            r = (r32 >> 8).to_u8
-            g = (g32 >> 8).to_u8
-            b = (b32 >> 8).to_u8
+              # Get RGB values
+              r32, g32, b32, _ = color.rgba
+              r = (r32 >> 8).to_u8
+              g = (g32 >> 8).to_u8
+              b = (b32 >> 8).to_u8
 
-            # Convert to YCbCr
-            yy, cb, cr = CrImage::Color.rgb_to_ycbcr(r, g, b)
+              # Convert to YCbCr
+              yy, cb, cr = CrImage::Color.rgb_to_ycbcr(r, g, b)
 
-            # Store Y component (full resolution)
-            y_data[y * width + x] = yy
+              # Store Y component (full resolution)
+              y_data[y * width + x] = yy
 
-            # Store Cb and Cr components (subsampled - only for even pixels)
-            if y % 2 == 0 && x % 2 == 0
               cb_x = x // 2
               cb_y = y // 2
-              cb_data[cb_y * cb_width + cb_x] = cb
-              cr_data[cb_y * cb_width + cb_x] = cr
+              idx = cb_y * cb_width + cb_x
+              cb_sums[idx] += cb
+              cr_sums[idx] += cr
+              sample_counts[idx] += 1
             end
           end
         end
+
+        cb_data.size.times do |i|
+          count = sample_counts[i]
+          next if count == 0
+          cb_data[i] = (cb_sums[i] // count).to_u8
+          cr_data[i] = (cr_sums[i] // count).to_u8
+        end
+      end
+    end
+
+    private def convert_rgba_like_to_ycbcr(pix : Bytes, stride : Int32, width : Int32, height : Int32, cb_width : Int32,
+                                           y_data : Bytes, cb_sums : Array(Int32), cr_sums : Array(Int32), sample_counts : Array(Int32)) : Nil
+      src_offset = 0
+      height.times do |y|
+        dst_offset = y * width
+        x = 0
+        while x < width
+          src = src_offset + x * 4
+          yy, cb, cr = CrImage::Color.rgb_to_ycbcr(pix[src], pix[src + 1], pix[src + 2])
+          y_data[dst_offset + x] = yy
+
+          idx = (y // 2) * cb_width + (x // 2)
+          cb_sums[idx] += cb
+          cr_sums[idx] += cr
+          sample_counts[idx] += 1
+          x += 1
+        end
+        src_offset += stride
       end
     end
 
@@ -476,49 +538,61 @@ module CrImage::JPEG
     end
 
     # Encode one 8x8 MCU block
-    private def encode_mcu(bit_writer : BitWriter, data : Array(UInt8),
+    private def encode_mcu(bit_writer : BitWriter, data : Bytes,
                            data_width : Int32, data_height : Int32,
                            block_x : Int32, block_y : Int32,
                            quant_table : QuantTable,
                            dc_table : HuffmanTable, ac_table : HuffmanTable,
                            dc_predictors : Array(Int32), component_index : Int32) : Nil
       # Extract 8x8 block from data
-      block = Array(Int32).new(64, 0)
+      block = @block_buf
+      dct_buf = @dct_buf
 
       base_x = block_x * 8
       base_y = block_y * 8
 
-      8.times do |delta_y|
-        8.times do |delta_x|
-          x = base_x + delta_x
-          y = base_y + delta_y
+      if base_x + 8 <= data_width && base_y + 8 <= data_height
+        8.times do |delta_y|
+          src = (base_y + delta_y) * data_width + base_x
+          dst = delta_y * 8
+          8.times do |delta_x|
+            block[dst + delta_x] = data[src + delta_x].to_i32
+          end
+        end
+      else
+        8.times do |delta_y|
+          8.times do |delta_x|
+            x = base_x + delta_x
+            y = base_y + delta_y
 
-          if x < data_width && y < data_height
-            block[delta_y * 8 + delta_x] = data[y * data_width + x].to_i32
-          else
-            # Pad with 128 (neutral gray)
-            block[delta_y * 8 + delta_x] = 128
+            if x < data_width && y < data_height
+              block[delta_y * 8 + delta_x] = data[y * data_width + x].to_i32
+            else
+              # Pad with 128 (neutral gray)
+              block[delta_y * 8 + delta_x] = 128
+            end
           end
         end
       end
 
       # Apply forward DCT
-      block = DCT.transform(block)
+      DCT.transform_into(block, dct_buf)
 
       # Quantize coefficients
+      reciprocal = quant_table.reciprocal
       64.times do |i|
-        block[i] = (block[i].to_f64 / quant_table.table[i].to_f64).round.to_i32
+        dct_buf[i] = (dct_buf[i].to_f64 * reciprocal[i]).round.to_i32
       end
 
       # Encode DC coefficient
-      dc_value = block[0]
+      dc_value = dct_buf[0]
       dc_diff = dc_value - dc_predictors[component_index]
       dc_predictors[component_index] = dc_value
 
       encode_coefficient(bit_writer, dc_diff, dc_table)
 
       # Encode AC coefficients in zigzag order
-      encode_ac_coefficients(bit_writer, block, ac_table)
+      encode_ac_coefficients(bit_writer, dct_buf, ac_table)
     end
 
     # Encode a single coefficient (DC or AC)
@@ -602,30 +676,9 @@ module CrImage::JPEG
 
     # Encode a Huffman symbol
     private def encode_huffman_symbol(bit_writer : BitWriter, symbol : UInt8, table : HuffmanTable) : Nil
-      # Build Huffman codes from bits and values arrays
-      # This generates codes according to JPEG spec
-      code = 0_u16
-      value_index = 0
-
-      table.bits.each_with_index do |count, length_idx|
-        length = length_idx + 1 # Actual bit length (1-16)
-
-        count.times do
-          if table.values[value_index] == symbol
-            # Found our symbol - write the code
-            bit_writer.write_bits(code, length)
-            return
-          end
-
-          value_index += 1
-          code += 1
-        end
-
-        # Shift code left for next length
-        code <<= 1
-      end
-
-      raise FormatError.new("Symbol #{symbol} not found in Huffman table")
+      size = table.encode_sizes[symbol]
+      raise FormatError.new("Symbol #{symbol} not found in Huffman table") if size == 0
+      bit_writer.write_bits(table.encode_codes[symbol], size)
     end
   end
 end

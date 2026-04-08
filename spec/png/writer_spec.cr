@@ -63,13 +63,29 @@ module CrImage::PNG
       File.delete(path)
     end
 
-    it "handles empty image dimensions" do
+    it "rejects empty image dimensions" do
       img = CrImage::RGBA.new(CrImage.rect(0, 0, 0, 0))
+      io = IO::Memory.new
+      expect_raises(FormatError, /Invalid Image size/) do
+        PNG.write(io, img)
+      end
+    end
+
+    it "preserves palette transparency in read_config" do
+      palette = Color::Palette.new([
+        Color::NRGBA.new(0, 0, 0, 0).as(Color::Color),
+        Color::NRGBA.new(255, 255, 255, 255).as(Color::Color),
+      ])
+      img = CrImage::Paletted.new(CrImage.rect(0, 0, 2, 1), palette)
 
       io = IO::Memory.new
-      # Empty images are written successfully (0x0 PNG)
       PNG.write(io, img)
-      io.size.should be > 0
+      io.rewind
+
+      config = PNG.read_config(io)
+      config_palette = config.color_model.as(Color::Palette)
+      _, _, _, alpha = config_palette[0].rgba
+      alpha.should eq(0_u32)
     end
 
     it "writes NRGBA image" do

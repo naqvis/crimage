@@ -1,6 +1,27 @@
 require "./color"
 
 module CrImage::Color
+  YCBCR_YY1_TABLE   = StaticArray(Int32, 256).new { |i| i.to_i32 * YCBCR_YY1_MULTIPLIER }
+  YCBCR_CB_B_TABLE  = StaticArray(Int32, 256).new { |i| RGB_FROM_CB_COEFF * (i.to_i32 - 128) }
+  YCBCR_CR_R_TABLE  = StaticArray(Int32, 256).new { |i| RGB_FROM_CR_COEFF * (i.to_i32 - 128) }
+  YCBCR_CB_G_TABLE  = StaticArray(Int32, 256).new { |i| RGB_FROM_CB_G_COEFF * (i.to_i32 - 128) }
+  YCBCR_CR_G_TABLE  = StaticArray(Int32, 256).new { |i| RGB_FROM_CR_G_COEFF * (i.to_i32 - 128) }
+  RGB_TO_Y_R_TABLE  = StaticArray(Int32, 256).new { |i| YCBCR_Y_R_COEFF * i.to_i32 }
+  RGB_TO_Y_G_TABLE  = StaticArray(Int32, 256).new { |i| YCBCR_Y_G_COEFF * i.to_i32 }
+  RGB_TO_Y_B_TABLE  = StaticArray(Int32, 256).new { |i| YCBCR_Y_B_COEFF * i.to_i32 }
+  RGB_TO_CB_R_TABLE = StaticArray(Int32, 256).new { |i| YCBCR_CB_R_COEFF * i.to_i32 }
+  RGB_TO_CB_G_TABLE = StaticArray(Int32, 256).new { |i| YCBCR_CB_G_COEFF * i.to_i32 }
+  RGB_TO_CB_B_TABLE = StaticArray(Int32, 256).new { |i| YCBCR_CB_B_COEFF * i.to_i32 }
+  RGB_TO_CR_R_TABLE = StaticArray(Int32, 256).new { |i| YCBCR_CR_R_COEFF * i.to_i32 }
+  RGB_TO_CR_G_TABLE = StaticArray(Int32, 256).new { |i| YCBCR_CR_G_COEFF * i.to_i32 }
+  RGB_TO_CR_B_TABLE = StaticArray(Int32, 256).new { |i| YCBCR_CR_B_COEFF * i.to_i32 }
+  YCBCR_RANGE_LIMIT = StaticArray(UInt8, 768).new do |i|
+    value = i.to_i32 - 256
+    value = 0 if value < 0
+    value = 255 if value > 255
+    value.to_u8
+  end
+
   # YCbCr represents a fully opaque 24-bit Y'CbCr color, having 8 bits each for
   # one luma and two chroma components.
   #
@@ -137,16 +158,12 @@ module CrImage::Color
     #	cr =  0.5000*r - 0.4187*g - 0.0813*b + 128
     # https:#www.w3.org/Graphics/JPEG/jfif3.pdf says y but means y'.
 
-    r1 = r.to_i32
-    g1 = g.to_i32
-    b1 = b.to_i32
-
     # yy is in range 0..0xff
     # Note that YCBCR_Y_R_COEFF + YCBCR_Y_G_COEFF + YCBCR_Y_B_COEFF equals 65536.
-    yy = (YCBCR_Y_R_COEFF*r1 + YCBCR_Y_G_COEFF*g1 + YCBCR_Y_B_COEFF*b1 + (1 << 15)) >> 16
+    yy = (RGB_TO_Y_R_TABLE[r] + RGB_TO_Y_G_TABLE[g] + RGB_TO_Y_B_TABLE[b] + (1 << 15)) >> 16
 
     # Note that YCBCR_CB_R_COEFF + YCBCR_CB_G_COEFF + YCBCR_CB_B_COEFF equals 0.
-    cb = YCBCR_CB_R_COEFF*r1 + YCBCR_CB_G_COEFF*g1 + YCBCR_CB_B_COEFF*b1 + YCBCR_CHROMA_OFFSET
+    cb = RGB_TO_CB_R_TABLE[r] + RGB_TO_CB_G_TABLE[g] + RGB_TO_CB_B_TABLE[b] + YCBCR_CHROMA_OFFSET
     if cb.to_u32! & 0xff000000 == 0
       cb >>= 16
     else
@@ -154,7 +171,7 @@ module CrImage::Color
     end
 
     # Note that YCBCR_CR_R_COEFF + YCBCR_CR_G_COEFF + YCBCR_CR_B_COEFF equals 0.
-    cr = YCBCR_CR_R_COEFF*r1 + YCBCR_CR_G_COEFF*g1 + YCBCR_CR_B_COEFF*b1 + YCBCR_CHROMA_OFFSET
+    cr = RGB_TO_CR_R_TABLE[r] + RGB_TO_CR_G_TABLE[g] + RGB_TO_CR_B_TABLE[b] + YCBCR_CHROMA_OFFSET
     if cr.to_u32! & 0xff000000 == 0
       cr >>= 16
     else
@@ -255,31 +272,26 @@ module CrImage::Color
   # This is used internally for fast YCbCr to RGB conversion
   @[AlwaysInline]
   def self.ycbcr_to_rgb_16bit(y : UInt8, cb : UInt8, cr : UInt8) : {UInt32, UInt32, UInt32}
-    yy1 = y.to_i32 * YCBCR_YY1_MULTIPLIER
-    cb1 = cb.to_i32 - 128
-    cr1 = cr.to_i32 - 128
+    yy1 = YCBCR_YY1_TABLE[y]
 
-    r = yy1 + RGB_FROM_CR_COEFF*cr1
-    if r.to_u32! & 0xff000000 == 0
-      r >>= 8
+    r = clamp_ycbcr_16bit(yy1 + YCBCR_CR_R_TABLE[cr])
+    g = clamp_ycbcr_16bit(yy1 - YCBCR_CB_G_TABLE[cb] - YCBCR_CR_G_TABLE[cr])
+    b = clamp_ycbcr_16bit(yy1 + YCBCR_CB_B_TABLE[cb])
+
+    {r, g, b}
+  end
+
+  @[AlwaysInline]
+  def self.clamp_ycbcr_16bit(value : Int32) : UInt32
+    if value.to_u32! & 0xff000000 == 0
+      (value >> 8).to_u32
     else
-      r = (~0 ^ (r >> 31)) & 0xffff
+      ((~0 ^ (value >> 31)) & 0xffff).to_u32
     end
+  end
 
-    g = yy1 - RGB_FROM_CB_G_COEFF*cb1 - RGB_FROM_CR_G_COEFF*cr1
-    if g.to_u32! & 0xff000000 == 0
-      g >>= 8
-    else
-      g = (~0 ^ (g >> 31)) & 0xffff
-    end
-
-    b = yy1 + RGB_FROM_CB_COEFF*cb1
-    if b.to_u32! & 0xff000000 == 0
-      b >>= 8
-    else
-      b = (~0 ^ (b >> 31)) & 0xffff
-    end
-
-    {r.to_u32, g.to_u32, b.to_u32}
+  @[AlwaysInline]
+  def self.clamp_ycbcr_8bit(value : Int32) : UInt8
+    YCBCR_RANGE_LIMIT[(value >> 16) + 256]
   end
 end

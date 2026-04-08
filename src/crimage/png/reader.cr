@@ -144,9 +144,8 @@ module CrImage::PNG
 
     protected def parse_config : CrImage::Config
       loop do
-        parse_chunk
-        break if @stage == DecodingStage::IHDR && !@cb.paletted?
-        break if @stage == DecodingStage::PLTE && @cb.paletted?
+        parse_chunk(parse_image_data: false)
+        break if @stage == DecodingStage::IDAT
       end
       cm = case @cb
            when .g1?, .g2?, .g4?, .g8?
@@ -173,7 +172,7 @@ module CrImage::PNG
       CrImage::Config.new(cm, width, height)
     end
 
-    private def parse_chunk
+    private def parse_chunk(parse_image_data : Bool = true)
       read_bytes(8)
       length = IO::ByteFormat::BigEndian.decode(UInt32, @buffer[0, 4])
       tag = read_tag
@@ -197,10 +196,14 @@ module CrImage::PNG
         @stage = DecodingStage::TRNS
         return parse_trns(length)
       when .idat?
-        if (@stage == DecodingStage::IHDR && @cb.paletted?) ||
-           (tag.value < DecodingStage::IHDR.value || tag.value > DecodingStage::IDAT.value)
-          raise FormatError.new("png： chunk out of order")
-        elsif @stage == DecodingStage::IDAT
+        valid_stage = if @cb.paletted?
+                        @stage == DecodingStage::PLTE || @stage == DecodingStage::TRNS || @stage == DecodingStage::IDAT
+                      else
+                        @stage == DecodingStage::IHDR || @stage == DecodingStage::TRNS || @stage == DecodingStage::IDAT
+                      end
+        raise FormatError.new("png： chunk out of order") unless valid_stage
+
+        if @stage == DecodingStage::IDAT
           # Ignore trailing zero-length or garbage IDAT chunks.
           #
           # This does not affect valid PNG images that contain multiple IDAT
@@ -210,7 +213,7 @@ module CrImage::PNG
           # do nothing
         else
           @stage = DecodingStage::IDAT
-          return parse_idat(length)
+          return parse_image_data ? parse_idat(length) : skip_chunk_data(length)
         end
       when .iend?
         raise FormatError.new("png： chunk out of order") unless @stage == DecodingStage::IDAT
@@ -219,16 +222,7 @@ module CrImage::PNG
       else
         # Just skip
       end
-      raise FormatError.new("Bad chunk length: #{length}") if length > 0x7fffffff
-
-      # Ignore this chunk (of a known length).
-      ignored = Bytes.new(4096)
-      while length > 0
-        n = io.read_fully(ignored[...::Math.min(length, ignored.size)])
-        @crc.write(ignored[...n])
-        length -= n
-      end
-      verify_checksum
+      skip_chunk_data(length)
     end
 
     private def read_tag
@@ -271,7 +265,7 @@ module CrImage::PNG
 
       w = IO::ByteFormat::BigEndian.decode(Int32, @buffer[0...4])
       h = IO::ByteFormat::BigEndian.decode(Int32, @buffer[4...8])
-      raise FormatError.new("PNG: invalid dimensions #{w}x#{h}, width and height must be positive") unless w >= 0 && h >= 0
+      raise FormatError.new("PNG: invalid dimensions #{w}x#{h}, width and height must be positive") unless w > 0 && h > 0
       n_pixels = w.to_i64 * h.to_i64
       raise FormatError.new("PNG: image too large, #{w}x#{h} exceeds maximum safe pixel count") if n_pixels > Int32::MAX.to_i64
       # There can be up to 8 bytes per pixel, for 16 bits per channel RGBA
@@ -394,9 +388,7 @@ module CrImage::PNG
         raise FormatError.new("bad tRNS legnth") if length > 256
         n = read_bytes(length)
         @crc.write(@buffer[...n])
-        if @palette.size < n
-          @pallete = Color::Palette.new(@palette[...n])
-        end
+        raise FormatError.new("bad tRNS length") if @palette.size < n
         0.upto(n - 1) do |i|
           color = @palette[i]
           next unless color.is_a?(Color::RGBA)
@@ -404,6 +396,19 @@ module CrImage::PNG
         end
       else
         raise FormatError.new("tRNS, color type mismatch")
+      end
+      verify_checksum
+    end
+
+    private def skip_chunk_data(length : UInt32)
+      raise FormatError.new("Bad chunk length: #{length}") if length > 0x7fffffff
+
+      remaining = length
+      ignored = Bytes.new(4096)
+      while remaining > 0
+        n = io.read_fully(ignored[...::Math.min(remaining, ignored.size)])
+        @crc.write(ignored[...n])
+        remaining -= n
       end
       verify_checksum
     end

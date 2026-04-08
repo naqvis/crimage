@@ -4,36 +4,78 @@ module CrImage::JPEG
   # Implements JPEG decoding for baseline and progressive DCT modes.
   # Supports grayscale and YCbCr color spaces with various subsampling ratios.
   class Reader
+    @[AlwaysInline]
+    private def store_rgba4_simd(dst : UInt32*, p0 : UInt32, p1 : UInt32, p2 : UInt32, p3 : UInt32) : Nil
+      packed = StaticArray[p0, p1, p2, p3]
+      src = packed.to_unsafe
+
+      {% if flag?(:x86_64) %}
+        asm(
+          "movdqu ($1), %xmm0
+           movdqu %xmm0, ($0)"
+                :: "r"(dst), "r"(src)
+                : "xmm0", "memory"
+                : "volatile"
+        )
+      {% elsif flag?(:aarch64) %}
+        asm(
+          "ld1 {v0.16b}, [$1]
+           st1 {v0.16b}, [$0]"
+                :: "r"(dst), "r"(src)
+                : "v0", "memory"
+                : "volatile"
+        )
+      {% else %}
+        dst[0] = p0
+        dst[1] = p1
+        dst[2] = p2
+        dst[3] = p3
+      {% end %}
+    end
+
     @io : IO
     @frame_header : FrameHeader?
     @quant_tables : Array(QuantTable?)
     @dc_tables : Array(HuffmanTable?)
     @ac_tables : Array(HuffmanTable?)
-    @mcu_buf : Array(Array(Int32))
-    @decoded_data : Array(Array(UInt8))?
+    @decoded_data : Array(Bytes)?
     @progressive : Bool
     @baseline : Bool
-    @prog_coeffs : Array(Array(Array(Int32))?)
+    @prog_coeffs : Array(Slice(Int32)?)
     @eob_run : UInt16
-
+    @saved_marker : UInt8?
+    @block_buf : Slice(Int32)
+    @idct_buf : Slice(Int32)
+    @pixel_buf : Bytes
+    @block_nonzero : Slice(Int32)
+    @block_nonzero_count : Int32
     private def initialize(@io : IO)
       @frame_header = nil
       @quant_tables = Array(QuantTable?).new(4, nil)
       @dc_tables = Array(HuffmanTable?).new(4, nil)
       @ac_tables = Array(HuffmanTable?).new(4, nil)
-      @mcu_buf = [] of Array(Int32)
       @decoded_data = nil
       @progressive = false
       @baseline = true
-      @prog_coeffs = Array(Array(Array(Int32))?).new(4, nil)
+      @prog_coeffs = Array(Slice(Int32)?).new(4, nil)
       @eob_run = 0_u16
+      @saved_marker = nil
+      @block_buf = Slice(Int32).new(64, 0)
+      @idct_buf = Slice(Int32).new(64, 0)
+      @pixel_buf = Bytes.new(64, 0_u8)
+      @block_nonzero = Slice(Int32).new(64, 0)
+      @block_nonzero_count = 0
+    end
+
+    @[AlwaysInline]
+    private def uninitialized_bytes(size : Int32) : Bytes
+      Slice.new(GC.malloc_atomic(size).as(UInt8*), size)
     end
 
     # Read JPEG image from file path
     def self.read(path : String) : CrImage::Image
-      File.open(path) do |file|
-        read(file)
-      end
+      data = File.read(path)
+      read(IO::Memory.new(data))
     rescue ex : IO::Error
       raise FormatError.new("Failed to read file: #{ex.message}")
     end
@@ -50,9 +92,8 @@ module CrImage::JPEG
 
     # Read JPEG config from file path
     def self.read_config(path : String) : CrImage::Config
-      File.open(path) do |file|
-        read_config(file)
-      end
+      data = File.read(path)
+      read_config(IO::Memory.new(data))
     rescue ex : IO::Error
       raise FormatError.new("Failed to read file: #{ex.message}")
     end
@@ -234,6 +275,11 @@ module CrImage::JPEG
     # Read the next marker from the stream
     # Returns the marker byte (without the 0xFF prefix)
     private def read_marker : UInt8
+      if marker = @saved_marker
+        @saved_marker = nil
+        return marker
+      end
+
       # Skip any padding bytes (0xFF)
       loop do
         byte = @io.read_byte
@@ -377,6 +423,7 @@ module CrImage::JPEG
         component = Component.new(id, h_samp, v_samp, quant_table)
         @frame_header.not_nil!.components << component
       end
+
     end
 
     # Parse DHT (Define Huffman Table) segment
@@ -559,8 +606,8 @@ module CrImage::JPEG
       num_components = frame.components.size
 
       # Find maximum sampling factors
-      max_h_samp = frame.components.max_of(&.h_samp)
-      max_v_samp = frame.components.max_of(&.v_samp)
+      max_h_samp = frame.components.max_of(&.h_samp).to_i32
+      max_v_samp = frame.components.max_of(&.v_samp).to_i32
 
       # Calculate MCU dimensions
       mcu_width = max_h_samp * 8
@@ -569,13 +616,16 @@ module CrImage::JPEG
       mcu_rows = (height + mcu_height - 1) // mcu_height
 
       # Allocate storage for decoded components (only for baseline)
+      comp_widths = Array(Int32).new(num_components, 0)
+      comp_heights = Array(Int32).new(num_components, 0)
+      frame.components.each_with_index do |comp, i|
+        comp_widths[i] = (width * comp.h_samp + max_h_samp - 1) // max_h_samp
+        comp_heights[i] = (height * comp.v_samp + max_v_samp - 1) // max_v_samp
+      end
+
       if !@progressive && @decoded_data.nil?
         @decoded_data = Array.new(num_components) do |i|
-          comp = frame.components[i]
-          # Calculate component dimensions based on sampling factors
-          comp_width = (width * comp.h_samp + max_h_samp - 1) // max_h_samp
-          comp_height = (height * comp.v_samp + max_v_samp - 1) // max_v_samp
-          Array(UInt8).new(comp_width * comp_height, 0_u8)
+          uninitialized_bytes(comp_widths[i] * comp_heights[i])
         end
       end
 
@@ -585,7 +635,7 @@ module CrImage::JPEG
           component = frame.components[comp_idx]
           if @prog_coeffs[comp_idx].nil?
             num_blocks = mcu_cols * mcu_rows * component.h_samp * component.v_samp
-            @prog_coeffs[comp_idx] = Array.new(num_blocks) { Array(Int32).new(64, 0) }
+            @prog_coeffs[comp_idx] = Slice(Int32).new(num_blocks * 64, 0)
           end
         end
       end
@@ -598,9 +648,21 @@ module CrImage::JPEG
         frame.components[comp_idx].dc_pred = 0
       end
 
+      if @progressive && frame.num_scan_components == 1
+        decode_progressive_single_scan(bit_reader, frame, mcu_cols, mcu_rows, comp_widths, comp_heights)
+        bit_reader.finish
+        @saved_marker = bit_reader.saved_marker
+        return
+      end
+
+      if @progressive && frame.num_scan_components > 1 && frame.ah == 0 && frame.zig_start == 0 && frame.zig_end == 0
+        decode_progressive_interleaved_dc_scan(bit_reader, frame, mcu_cols, mcu_rows)
+        bit_reader.finish
+        @saved_marker = bit_reader.saved_marker
+        return
+      end
+
       # Decode MCUs
-      block_count = 0
-      num_scan_comps = frame.num_scan_components
       mcu_rows.times do |mcu_y|
         mcu_cols.times do |mcu_x|
           # Decode each component in the scan
@@ -608,53 +670,188 @@ module CrImage::JPEG
             component = frame.components[comp_idx]
             hi = component.h_samp.to_i32
             vi = component.v_samp.to_i32
+            dc_table = @dc_tables[component.dc_table]
+            ac_table = @ac_tables[component.ac_table]
+            quant_table = @quant_tables[component.quant_table]
 
             # Each component may have multiple blocks based on sampling factors
             (hi * vi).times do |j|
-              # Calculate block position
-              # For interleaved scans: bx = hi*mx + j%hi, by = vi*my + j/hi
-              # For non-interleaved scans (progressive AC): linear order
-              bx : Int32
-              by : Int32
-              if num_scan_comps != 1
-                bx = hi * mcu_x + (j % hi)
-                by = vi * mcu_y + (j // hi)
-              else
-                q = mcu_cols * hi
-                bx = block_count % q
-                by = block_count // q
-                block_count += 1
-                # Skip blocks outside image bounds for non-interleaved scans
-                if bx * 8 >= width || by * 8 >= height
-                  next
-                end
+              bx = hi * mcu_x + (j % hi)
+              by = vi * mcu_y + (j // hi)
+
+              if frame.num_scan_components == 1
+                next if bx * 8 >= comp_widths[comp_idx] || by * 8 >= comp_heights[comp_idx]
               end
 
               if @progressive
                 decode_progressive_block(bit_reader, component, comp_idx, bx, by, mcu_cols)
               else
-                decode_mcu(bit_reader, component, comp_idx, bx, by, width, height)
+                raise FormatError.new("DC Huffman table #{component.dc_table} not defined") if dc_table.nil?
+                raise FormatError.new("AC Huffman table #{component.ac_table} not defined") if ac_table.nil?
+                raise FormatError.new("Quantization table #{component.quant_table} not defined") if quant_table.nil?
+                decode_mcu(bit_reader, component, bx, by, comp_widths[comp_idx], comp_heights[comp_idx],
+                  dc_table, ac_table, quant_table, @decoded_data.not_nil![comp_idx])
               end
             end
           end
         end
       end
+
+      bit_reader.finish
+      @saved_marker = bit_reader.saved_marker
+    end
+
+    private def decode_progressive_interleaved_dc_scan(bit_reader : BitReader, frame : FrameHeader,
+                                                       mcu_cols : Int32, mcu_rows : Int32) : Nil
+      frame.scan_components.each do |comp_idx|
+        component = frame.components[comp_idx]
+        if @prog_coeffs[comp_idx].nil?
+          num_blocks = mcu_cols * mcu_rows * component.h_samp * component.v_samp
+          @prog_coeffs[comp_idx] = Slice(Int32).new(num_blocks * 64, 0)
+        end
+      end
+
+      mcu_rows.times do |mcu_y|
+        mcu_cols.times do |mcu_x|
+          frame.scan_components.each do |comp_idx|
+            component = frame.components[comp_idx]
+            hi = component.h_samp.to_i32
+            vi = component.v_samp.to_i32
+            dc_table = @dc_tables[component.dc_table]
+            raise FormatError.new("DC Huffman table #{component.dc_table} not defined") if dc_table.nil?
+            dc = dc_table.not_nil!
+            coeffs = @prog_coeffs[comp_idx]
+            raise FormatError.new("Progressive coefficients not allocated") if coeffs.nil?
+            coeffs_ptr = coeffs.not_nil!.to_unsafe
+            stride = mcu_cols * hi
+            dc_pred = component.dc_pred
+
+            (hi * vi).times do |j|
+              bx = hi * mcu_x + (j % hi)
+              by = vi * mcu_y + (j // hi)
+              block = coeffs_ptr + ((by * stride + bx) * 64)
+
+              dc_size = dc.decode(bit_reader)
+              dc_diff = 0
+              if dc_size > 0
+                dc_diff = receive_and_extend(bit_reader, dc_size)
+              end
+              dc_pred += dc_diff
+              block[0] = dc_pred
+            end
+
+            component.dc_pred = dc_pred
+          end
+        end
+      end
+    end
+
+    private def decode_progressive_single_scan(bit_reader : BitReader, frame : FrameHeader,
+                                               mcu_cols : Int32, _mcu_rows : Int32,
+                                               comp_widths : Array(Int32), comp_heights : Array(Int32)) : Nil
+      comp_idx = frame.scan_components[0]
+      component = frame.components[comp_idx]
+      hi = component.h_samp.to_i32
+      vi = component.v_samp.to_i32
+      comp_width = comp_widths[comp_idx]
+      comp_height = comp_heights[comp_idx]
+      coeffs = @prog_coeffs[comp_idx]
+      raise FormatError.new("Progressive coefficients not allocated") if coeffs.nil?
+      coeffs = coeffs.not_nil!
+      coeffs_ptr = coeffs.to_unsafe
+      stride = mcu_cols * hi
+      block_rows = (comp_height + 7) // 8
+      block_cols = (comp_width + 7) // 8
+
+      zig_start = frame.zig_start
+      zig_end = frame.zig_end
+      ah = frame.ah
+      al = frame.al
+      delta = 1_i32 << al
+      zigzag = ZIGZAG
+
+      dc_table : HuffmanTable? = nil
+      ac_table : HuffmanTable? = nil
+
+      if zig_start == 0
+        dc_table = @dc_tables[component.dc_table]
+        raise FormatError.new("DC Huffman table #{component.dc_table} not defined") if dc_table.nil?
+      end
+      if zig_end > 0
+        ac_table = @ac_tables[component.ac_table]
+        raise FormatError.new("AC Huffman table #{component.ac_table} not defined") if ac_table.nil?
+      end
+
+      by = 0
+      while by < block_rows
+        row_base = by * stride
+        bx = 0
+        while bx < block_cols
+          block = coeffs_ptr + ((row_base + bx) * 64)
+          if ah != 0
+            if zig_start != 0 || zig_end != 0
+              raise FormatError.new("AC table required for AC refinement") if ac_table.nil?
+            end
+            refine_block(bit_reader, block, ac_table, zig_start, zig_end, delta)
+          else
+            zig = zig_start
+            if zig == 0
+              raise FormatError.new("DC table required") if dc_table.nil?
+              dc = dc_table.not_nil!
+              zig += 1
+              dc_size = dc.decode(bit_reader)
+              dc_diff = 0
+              if dc_size > 0
+                dc_diff = receive_and_extend(bit_reader, dc_size)
+              end
+              component.dc_pred += dc_diff
+              block[0] = component.dc_pred << al
+            end
+
+            if zig <= zig_end && @eob_run > 0
+              @eob_run -= 1
+            elsif zig <= zig_end
+              raise FormatError.new("AC table required") if ac_table.nil?
+              ac = ac_table.not_nil!
+              while zig <= zig_end
+                rs = ac.decode(bit_reader)
+                run = (rs >> 4) & 0x0F
+                size = rs & 0x0F
+
+                if size != 0
+                  zig += run
+                  break if zig > zig_end
+
+                  coeff = receive_and_extend(bit_reader, size)
+                  block[zigzag[zig]] = coeff << al
+                  zig += 1
+                else
+                  if run != 0x0F
+                    @eob_run = 1_u16 << run
+                    if run != 0
+                      bits = bit_reader.read_bits(run.to_i32)
+                      @eob_run |= bits
+                    end
+                    @eob_run -= 1
+                    break
+                  end
+                  zig += 16
+                end
+              end
+            end
+          end
+          bx += 1
+        end
+        by += 1
+      end
     end
 
     # Decode one 8x8 block for a component
     private def decode_mcu(bit_reader : BitReader, component : Component,
-                           comp_idx : Int32, block_x : Int32, block_y : Int32,
-                           width : Int32, height : Int32) : Nil
-      # Get Huffman tables
-      dc_table = @dc_tables[component.dc_table]
-      ac_table = @ac_tables[component.ac_table]
-      raise FormatError.new("DC Huffman table #{component.dc_table} not defined") if dc_table.nil?
-      raise FormatError.new("AC Huffman table #{component.ac_table} not defined") if ac_table.nil?
-
-      # Get quantization table
-      quant_table = @quant_tables[component.quant_table]
-      raise FormatError.new("Quantization table #{component.quant_table} not defined") if quant_table.nil?
-
+                           block_x : Int32, block_y : Int32,
+                           comp_width : Int32, comp_height : Int32,
+                           dc_table : HuffmanTable, ac_table : HuffmanTable,
+                           quant_table : QuantTable, decoded : Bytes) : Nil
       # Decode DC coefficient
       dc_size = dc_table.decode(bit_reader)
       dc_diff = 0
@@ -664,17 +861,19 @@ module CrImage::JPEG
       component.dc_pred += dc_diff
 
       # Initialize block with DC value
-      block = Array(Int32).new(64, 0)
+      block = @block_buf
+      count = @block_nonzero_count
+      count.times do |i|
+        block[@block_nonzero[i]] = 0
+      end
+      @block_nonzero_count = 1
+      @block_nonzero[0] = 0
       block[0] = component.dc_pred
 
       # Decode AC coefficients using run-length encoding
       k = 1
-      iterations = 0
-      max_iterations = 128 # Safety limit to prevent infinite loops
+      zigzag = ZIGZAG
       while k < 64
-        iterations += 1
-        raise FormatError.new("JPEG: too many iterations in AC coefficient decoding") if iterations > max_iterations
-
         rs = ac_table.decode(bit_reader)
 
         # rs high 4 bits = run length (number of zeros)
@@ -699,35 +898,31 @@ module CrImage::JPEG
 
           # Decode coefficient
           coeff = receive_and_extend(bit_reader, size)
-          if k < 64
-            zigzag_idx = ZIGZAG[k]
-            raise FormatError.new("JPEG: invalid zigzag index #{zigzag_idx}") if zigzag_idx >= 64
-            block[zigzag_idx] = coeff
-          end
+          zigzag_idx = zigzag[k]
+          block[zigzag_idx] = coeff
+          @block_nonzero[@block_nonzero_count] = zigzag_idx
+          @block_nonzero_count += 1
           k += 1
         end
       end
 
-      # Dequantize
-      64.times do |i|
-        block[i] = block[i] * quant_table.table[i].to_i32
-      end
-
       # Apply IDCT
-      block = IDCT.transform(block)
-
-      # Copy to output buffer
-      frame = @frame_header.not_nil!
-      decoded = @decoded_data.not_nil![comp_idx]
-
-      # Calculate component dimensions
-      max_h_samp = frame.components.max_of(&.h_samp)
-      max_v_samp = frame.components.max_of(&.v_samp)
-      comp_width = (width * component.h_samp + max_h_samp - 1) // max_h_samp
-      comp_height = (height * component.v_samp + max_v_samp - 1) // max_v_samp
+      pixels = @pixel_buf
+      IDCT.transform_dequantize_pixels_into(block, quant_table.table, @idct_buf, pixels)
 
       base_x = block_x * 8
       base_y = block_y * 8
+
+      if base_x + 8 <= comp_width && base_y + 8 <= comp_height
+        decoded_ptr = decoded.to_unsafe
+        pixels_ptr = pixels.to_unsafe
+        8.times do |delta_y|
+          src = delta_y * 8
+          dst = (base_y + delta_y) * comp_width + base_x
+          (decoded_ptr + dst).copy_from(pixels_ptr + src, 8)
+        end
+        return
+      end
 
       8.times do |delta_y|
         8.times do |delta_x|
@@ -735,27 +930,22 @@ module CrImage::JPEG
           y = base_y + delta_y
           next if x >= comp_width || y >= comp_height
 
-          pixel_value = block[delta_y * 8 + delta_x]
+          pixel_value = pixels[delta_y * 8 + delta_x]
           offset = y * comp_width + x
-          raise FormatError.new("JPEG: decoded buffer overflow at offset #{offset}, size #{decoded.size}") if offset >= decoded.size
-          decoded[offset] = pixel_value.clamp(0, 255).to_u8
+          decoded[offset] = pixel_value
         end
       end
     end
 
     # Receive and extend a value (JPEG spec Figure F.12)
+    @[AlwaysInline]
     private def receive_and_extend(bit_reader : BitReader, size : UInt8) : Int32
       return 0 if size == 0
 
-      # Read size bits
       value = bit_reader.read_bits(size.to_i32).to_i32
-
-      # Check if value is negative (high bit is 0)
-      # If high bit is 0, value is negative and needs extension
-      vt = 1 << (size - 1)
+      vt = 1 << (size.to_i32 - 1)
       if value < vt
-        # Extend negative value
-        value += (-1 << size) + 1
+        value += (-1 << size.to_i32) + 1
       end
 
       value
@@ -772,7 +962,8 @@ module CrImage::JPEG
       block_idx = block_y * stride + block_x
       coeffs = @prog_coeffs[comp_idx]
       raise FormatError.new("Progressive coefficients not allocated") if coeffs.nil?
-      block = coeffs[block_idx]
+      block_offset = block_idx * 64
+      block = coeffs.to_unsafe + block_offset
 
       zig_start = frame.zig_start
       zig_end = frame.zig_end
@@ -805,10 +996,12 @@ module CrImage::JPEG
         refine_block(bit_reader, block, ac_table, zig_start, zig_end, 1_i32 << al)
       else
         zig = zig_start
+        zigzag = ZIGZAG
 
         # Decode DC coefficient
         if zig == 0
           raise FormatError.new("DC table required") if dc_table.nil?
+          dc_table = dc_table.not_nil!
           zig += 1
           dc_size = dc_table.decode(bit_reader)
           dc_diff = 0
@@ -825,6 +1018,7 @@ module CrImage::JPEG
         elsif zig <= zig_end
           # Decode AC coefficients
           raise FormatError.new("AC table required") if ac_table.nil?
+          ac_table = ac_table.not_nil!
           while zig <= zig_end
             rs = ac_table.decode(bit_reader)
             run = (rs >> 4) & 0x0F
@@ -835,7 +1029,7 @@ module CrImage::JPEG
               break if zig > zig_end
 
               coeff = receive_and_extend(bit_reader, size)
-              block[ZIGZAG[zig]] = coeff << al
+              block[zigzag[zig]] = coeff << al
               zig += 1
             else
               if run != 0x0F
@@ -856,8 +1050,10 @@ module CrImage::JPEG
       end
     end
 
+
     # Refine block for successive approximation (progressive JPEG)
-    private def refine_block(bit_reader : BitReader, block : Array(Int32),
+    @[AlwaysInline]
+    private def refine_block(bit_reader : BitReader, block : Int32*,
                              h : HuffmanTable?, zig_start : Int32, zig_end : Int32,
                              delta : Int32) : Nil
       # Refining DC component is trivial
@@ -872,6 +1068,7 @@ module CrImage::JPEG
 
       # Refining AC components
       raise FormatError.new("Huffman table required for AC refinement") if h.nil?
+      h = h.not_nil!
 
       zig = zig_start
       if @eob_run == 0
@@ -920,12 +1117,14 @@ module CrImage::JPEG
     end
 
     # Refine non-zero entries in zig-zag order
-    private def refine_non_zeroes(bit_reader : BitReader, block : Array(Int32),
+    @[AlwaysInline]
+    private def refine_non_zeroes(bit_reader : BitReader, block : Int32*,
                                   zig : Int32, zig_end : Int32, nz : Int32,
                                   delta : Int32) : Int32
       current_zig = zig
+      zigzag = ZIGZAG
       while current_zig <= zig_end
-        u = ZIGZAG[current_zig]
+        u = zigzag[current_zig]
         if block[u] == 0
           if nz == 0
             break
@@ -958,8 +1157,8 @@ module CrImage::JPEG
       num_components = frame.components.size
 
       # Find maximum sampling factors
-      max_h_samp = frame.components.max_of(&.h_samp)
-      max_v_samp = frame.components.max_of(&.v_samp)
+      max_h_samp = frame.components.max_of(&.h_samp).to_i32
+      max_v_samp = frame.components.max_of(&.v_samp).to_i32
 
       mcu_cols = (width + max_h_samp * 8 - 1) // (max_h_samp * 8)
 
@@ -968,7 +1167,7 @@ module CrImage::JPEG
         comp = frame.components[i]
         comp_width = (width * comp.h_samp + max_h_samp - 1) // max_h_samp
         comp_height = (height * comp.v_samp + max_v_samp - 1) // max_v_samp
-        Array(UInt8).new(comp_width * comp_height, 0_u8)
+        uninitialized_bytes(comp_width * comp_height)
       end
 
       # Process each component
@@ -993,19 +1192,28 @@ module CrImage::JPEG
           bx = 0
           while bx * h < width
             block_idx = by * stride + bx
-            block = coeffs[block_idx]
-
-            # Dequantize
-            64.times do |i|
-              block[i] = block[i] * quant_table.table[i].to_i32
-            end
+            block_offset = block_idx * 64
+            block = coeffs[block_offset, 64]
 
             # Apply IDCT
-            block = IDCT.transform(block)
+            pixels = @pixel_buf
+            IDCT.transform_dequantize_pixels_into(block, quant_table.table, @idct_buf, pixels)
 
             # Copy to output buffer
             base_x = bx * 8
             base_y = by * 8
+
+            if base_x + 8 <= comp_width && base_y + 8 <= comp_height
+              decoded_ptr = decoded.to_unsafe
+              pixels_ptr = pixels.to_unsafe
+              8.times do |delta_y|
+                src = delta_y * 8
+                dst = (base_y + delta_y) * comp_width + base_x
+                (decoded_ptr + dst).copy_from(pixels_ptr + src, 8)
+              end
+              bx += 1
+              next
+            end
 
             8.times do |delta_y|
               8.times do |delta_x|
@@ -1013,9 +1221,9 @@ module CrImage::JPEG
                 y = base_y + delta_y
                 next if x >= comp_width || y >= comp_height
 
-                pixel_value = block[delta_y * 8 + delta_x]
+                pixel_value = pixels[delta_y * 8 + delta_x]
                 offset = y * comp_width + x
-                decoded[offset] = pixel_value.clamp(0, 255).to_u8
+                decoded[offset] = pixel_value
               end
             end
 
@@ -1041,14 +1249,8 @@ module CrImage::JPEG
       # Handle grayscale images (1 component)
       if num_components == 1
         rect = CrImage.rect(0, 0, width, height)
-        gray_img = CrImage::Gray.new(rect)
-
-        height.times do |y|
-          width.times do |x|
-            idx = y * width + x
-            gray_img.pix[idx] = decoded[0][idx]
-          end
-        end
+        gray_img = CrImage::Gray.new(uninitialized_bytes(width * height), width, rect)
+        gray_img.pix.copy_from(decoded[0].to_unsafe, decoded[0].size)
 
         return gray_img
       end
@@ -1056,49 +1258,406 @@ module CrImage::JPEG
       # Handle YCbCr images (3 components) - convert to RGBA
       if num_components == 3
         rect = CrImage.rect(0, 0, width, height)
-        rgba_img = CrImage::RGBA.new(rect)
+        rgba_img = CrImage::RGBA.new(uninitialized_bytes(width * height * 4), width * 4, rect)
 
         y_data = decoded[0]
         cb_data = decoded[1]
         cr_data = decoded[2]
+        pix = rgba_img.pix
+        y_ptr = y_data.to_unsafe
+        cb_ptr = cb_data.to_unsafe
+        cr_ptr = cr_data.to_unsafe
+        pix_ptr = pix.to_unsafe
+        pix32 = pix_ptr.as(UInt32*)
 
         # Get sampling factors
         cb_comp = frame.components[1]
         cr_comp = frame.components[2]
+        yy_table = CrImage::Color::YCBCR_YY1_TABLE
+        cb_b_table = CrImage::Color::YCBCR_CB_B_TABLE
+        cr_r_table = CrImage::Color::YCBCR_CR_R_TABLE
+        cb_g_table = CrImage::Color::YCBCR_CB_G_TABLE
+        cr_g_table = CrImage::Color::YCBCR_CR_G_TABLE
 
-        max_h_samp = frame.components.max_of(&.h_samp)
-        max_v_samp = frame.components.max_of(&.v_samp)
+        max_h_samp = frame.components.max_of(&.h_samp).to_i32
+        max_v_samp = frame.components.max_of(&.v_samp).to_i32
 
         cb_width = (width * cb_comp.h_samp + max_h_samp - 1) // max_h_samp
-        cr_width = (width * cr_comp.h_samp + max_h_samp - 1) // max_v_samp
+        cr_width = (width * cr_comp.h_samp + max_h_samp - 1) // max_h_samp
+
+        if cb_comp.h_samp == cr_comp.h_samp && cb_comp.v_samp == cr_comp.v_samp
+          h_ratio = max_h_samp // cb_comp.h_samp
+          v_ratio = max_v_samp // cb_comp.v_samp
+
+          if h_ratio == 2 && v_ratio == 2
+            if width.even? && height.even?
+              y = 0
+              while y < height
+                y_row0_ptr = y_ptr + (y * width)
+                y_row1_ptr = y_row0_ptr + width
+                out_row0 = pix32 + (y * width)
+                out_row1 = out_row0 + width
+                cb_row_ptr = cb_ptr + ((y >> 1) * cb_width)
+                cr_row_ptr = cr_ptr + ((y >> 1) * cb_width)
+
+                x = 0
+                simd_width = width & ~3
+                while x < simd_width
+                  chroma = x >> 1
+                  cb = cb_row_ptr[chroma]
+                  cr = cr_row_ptr[chroma]
+                  r_bias = cr_r_table[cr]
+                  g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                  b_bias = cb_b_table[cb]
+
+                  yy1 = yy_table[y_row0_ptr[x]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p00 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row0_ptr[x + 1]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p01 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row1_ptr[x]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  q00 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row1_ptr[x + 1]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  q01 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  cb = cb_row_ptr[chroma + 1]
+                  cr = cr_row_ptr[chroma + 1]
+                  r_bias = cr_r_table[cr]
+                  g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                  b_bias = cb_b_table[cb]
+
+                  yy1 = yy_table[y_row0_ptr[x + 2]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p02 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row0_ptr[x + 3]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p03 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row1_ptr[x + 2]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  q02 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row1_ptr[x + 3]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  q03 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  store_rgba4_simd(out_row0 + x, p00, p01, p02, p03)
+                  store_rgba4_simd(out_row1 + x, q00, q01, q02, q03)
+                  x += 4
+                end
+
+                while x < width
+                  chroma = x >> 1
+                  cb = cb_row_ptr[chroma]
+                  cr = cr_row_ptr[chroma]
+                  r_bias = cr_r_table[cr]
+                  g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                  b_bias = cb_b_table[cb]
+
+                  yy1 = yy_table[y_row0_ptr[x]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  out_row0[x] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row0_ptr[x + 1]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  out_row0[x + 1] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row1_ptr[x]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  out_row1[x] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row1_ptr[x + 1]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  out_row1[x + 1] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  x += 2
+                end
+                y += 2
+              end
+
+              return rgba_img
+            end
+
+            y = 0
+            while y < height
+              y_row0 = y * width
+              y_row1 = (y + 1) * width
+              cbcr_row = (y // 2) * cb_width
+
+              x = 0
+              cb_idx = cbcr_row
+              while x < width
+                cb = cb_ptr[cb_idx]
+                cr = cr_ptr[cb_idx]
+                r_bias = cr_r_table[cr]
+                g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                b_bias = cb_b_table[cb]
+
+                yy1 = yy_table[y_ptr[y_row0 + x]]
+                pixel_idx = y_row0 + x
+                r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                pix32[pixel_idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                if x + 1 < width
+                  yy1 = yy_table[y_ptr[y_row0 + x + 1]]
+                  pixel_idx += 1
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  pix32[pixel_idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+                end
+
+                if y + 1 < height
+                  yy1 = yy_table[y_ptr[y_row1 + x]]
+                  pixel_idx = y_row1 + x
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  pix32[pixel_idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  if x + 1 < width
+                    yy1 = yy_table[y_ptr[y_row1 + x + 1]]
+                    pixel_idx += 1
+                    r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                    g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                    b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                    pix32[pixel_idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+                  end
+                end
+
+                x += 2
+                cb_idx += 1
+              end
+              y += 2
+            end
+
+            return rgba_img
+          elsif h_ratio == 2 && v_ratio == 1
+            if width.even?
+              height.times do |y|
+                y_row_ptr = y_ptr + (y * width)
+                out_row = pix32 + (y * width)
+                cb_row_ptr = cb_ptr + (y * cb_width)
+                cr_row_ptr = cr_ptr + (y * cb_width)
+
+                x = 0
+                simd_width = width & ~3
+                while x < simd_width
+                  chroma = x >> 1
+                  cb = cb_row_ptr[chroma]
+                  cr = cr_row_ptr[chroma]
+                  r_bias = cr_r_table[cr]
+                  g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                  b_bias = cb_b_table[cb]
+
+                  yy1 = yy_table[y_row_ptr[x]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p0 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row_ptr[x + 1]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p1 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  cb = cb_row_ptr[chroma + 1]
+                  cr = cr_row_ptr[chroma + 1]
+                  r_bias = cr_r_table[cr]
+                  g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                  b_bias = cb_b_table[cb]
+
+                  yy1 = yy_table[y_row_ptr[x + 2]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p2 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row_ptr[x + 3]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  p3 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  store_rgba4_simd(out_row + x, p0, p1, p2, p3)
+                  x += 4
+                end
+
+                while x < width
+                  chroma = x >> 1
+                  cb = cb_row_ptr[chroma]
+                  cr = cr_row_ptr[chroma]
+                  r_bias = cr_r_table[cr]
+                  g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                  b_bias = cb_b_table[cb]
+
+                  yy1 = yy_table[y_row_ptr[x]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  out_row[x] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  yy1 = yy_table[y_row_ptr[x + 1]]
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  out_row[x + 1] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                  x += 2
+                end
+              end
+
+              return rgba_img
+            end
+
+            height.times do |y|
+              y_row = y * width
+              cbcr_row = y * cb_width
+
+              x = 0
+              cb_idx = cbcr_row
+              while x < width
+                cb = cb_ptr[cb_idx]
+                cr = cr_ptr[cb_idx]
+                r_bias = cr_r_table[cr]
+                g_bias = -cb_g_table[cb] - cr_g_table[cr]
+                b_bias = cb_b_table[cb]
+
+                yy1 = yy_table[y_ptr[y_row + x]]
+                pixel_idx = y_row + x
+                r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                pix32[pixel_idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+                if x + 1 < width
+                  yy1 = yy_table[y_ptr[y_row + x + 1]]
+                  pixel_idx += 1
+                  r = CrImage::Color.clamp_ycbcr_8bit(yy1 + r_bias)
+                  g = CrImage::Color.clamp_ycbcr_8bit(yy1 + g_bias)
+                  b = CrImage::Color.clamp_ycbcr_8bit(yy1 + b_bias)
+                  pix32[pixel_idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+                end
+
+                x += 2
+                cb_idx += 1
+              end
+            end
+
+            return rgba_img
+          elsif h_ratio == 1 && v_ratio == 1
+            idx = 0
+            total = width * height
+            simd_total = total & ~3
+            while idx < simd_total
+              yy1 = yy_table[y_ptr[idx]]
+              cb = cb_ptr[idx]
+              cr = cr_ptr[idx]
+              r = CrImage::Color.clamp_ycbcr_8bit(yy1 + cr_r_table[cr])
+              g = CrImage::Color.clamp_ycbcr_8bit(yy1 - cb_g_table[cb] - cr_g_table[cr])
+              b = CrImage::Color.clamp_ycbcr_8bit(yy1 + cb_b_table[cb])
+              p0 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+              yy1 = yy_table[y_ptr[idx + 1]]
+              cb = cb_ptr[idx + 1]
+              cr = cr_ptr[idx + 1]
+              r = CrImage::Color.clamp_ycbcr_8bit(yy1 + cr_r_table[cr])
+              g = CrImage::Color.clamp_ycbcr_8bit(yy1 - cb_g_table[cb] - cr_g_table[cr])
+              b = CrImage::Color.clamp_ycbcr_8bit(yy1 + cb_b_table[cb])
+              p1 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+              yy1 = yy_table[y_ptr[idx + 2]]
+              cb = cb_ptr[idx + 2]
+              cr = cr_ptr[idx + 2]
+              r = CrImage::Color.clamp_ycbcr_8bit(yy1 + cr_r_table[cr])
+              g = CrImage::Color.clamp_ycbcr_8bit(yy1 - cb_g_table[cb] - cr_g_table[cr])
+              b = CrImage::Color.clamp_ycbcr_8bit(yy1 + cb_b_table[cb])
+              p2 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+              yy1 = yy_table[y_ptr[idx + 3]]
+              cb = cb_ptr[idx + 3]
+              cr = cr_ptr[idx + 3]
+              r = CrImage::Color.clamp_ycbcr_8bit(yy1 + cr_r_table[cr])
+              g = CrImage::Color.clamp_ycbcr_8bit(yy1 - cb_g_table[cb] - cr_g_table[cr])
+              b = CrImage::Color.clamp_ycbcr_8bit(yy1 + cb_b_table[cb])
+              p3 = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+
+              store_rgba4_simd(pix32 + idx, p0, p1, p2, p3)
+              idx += 4
+            end
+
+            while idx < total
+              yy1 = yy_table[y_ptr[idx]]
+              cb = cb_ptr[idx]
+              cr = cr_ptr[idx]
+              r = CrImage::Color.clamp_ycbcr_8bit(yy1 + cr_r_table[cr])
+              g = CrImage::Color.clamp_ycbcr_8bit(yy1 - cb_g_table[cb] - cr_g_table[cr])
+              b = CrImage::Color.clamp_ycbcr_8bit(yy1 + cb_b_table[cb])
+              pix32[idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
+              idx += 1
+            end
+
+            return rgba_img
+          end
+        end
+
+        cb_x_map = Array(Int32).new(width) { |x| (x * cb_comp.h_samp) // max_h_samp }
+        cr_x_map = Array(Int32).new(width) { |x| (x * cr_comp.h_samp) // max_h_samp }
 
         height.times do |y|
+          y_row = y * width
+          cb_row = ((y * cb_comp.v_samp) // max_v_samp) * cb_width
+          cr_row = ((y * cr_comp.v_samp) // max_v_samp) * cr_width
+
           width.times do |x|
             # Y component (full resolution)
-            y_idx = y * width + x
+            y_idx = y_row + x
             yy = y_data[y_idx]
 
             # Cb and Cr components (may be subsampled)
-            # Calculate subsampled coordinates
-            cb_x = (x * cb_comp.h_samp) // max_h_samp
-            cb_y = (y * cb_comp.v_samp) // max_v_samp
-            cb_idx = cb_y * cb_width + cb_x
-            cb = cb_data[cb_idx]
+            cb = cb_data[cb_row + cb_x_map[x]]
+            cr = cr_data[cr_row + cr_x_map[x]]
 
-            cr_x = (x * cr_comp.h_samp) // max_h_samp
-            cr_y = (y * cr_comp.v_samp) // max_v_samp
-            cr_idx = cr_y * cr_width + cr_x
-            cr = cr_data[cr_idx]
+            yy1 = yy_table[yy]
+            r = CrImage::Color.clamp_ycbcr_8bit(yy1 + cr_r_table[cr])
+            g = CrImage::Color.clamp_ycbcr_8bit(yy1 - cb_g_table[cb] - cr_g_table[cr])
+            b = CrImage::Color.clamp_ycbcr_8bit(yy1 + cb_b_table[cb])
 
-            # Convert to RGB using the color module's conversion
-            r, g, b = CrImage::Color.ycbcr_to_rgb(yy, cb, cr)
-
-            # Set RGBA pixel (alpha = 255)
-            pix_idx = y_idx * 4
-            rgba_img.pix[pix_idx] = r
-            rgba_img.pix[pix_idx + 1] = g
-            rgba_img.pix[pix_idx + 2] = b
-            rgba_img.pix[pix_idx + 3] = 255_u8
+            pix32[y_idx] = 0xFF000000_u32 | (b.to_u32 << 16) | (g.to_u32 << 8) | r.to_u32
           end
         end
 
@@ -1108,7 +1667,7 @@ module CrImage::JPEG
       # Handle CMYK images (4 components) - convert to RGBA
       if num_components == 4
         rect = CrImage.rect(0, 0, width, height)
-        rgba_img = CrImage::RGBA.new(rect)
+        rgba_img = CrImage::RGBA.new(uninitialized_bytes(width * height * 4), width * 4, rect)
 
         c_data = decoded[0]
         m_data = decoded[1]

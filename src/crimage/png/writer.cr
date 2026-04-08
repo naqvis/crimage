@@ -21,6 +21,75 @@ module CrImage::PNG
   # PNG::Writer.write("test.png", img)
   # ```
   class Writer
+    private class IDATChunkIO < IO
+      CHUNK_SIZE = 64 * 1024
+
+      @buffer : IO::Memory
+      @consumed : Int32
+
+      def initialize(@target : IO, @chunk_size : Int32 = CHUNK_SIZE)
+        @buffer = IO::Memory.new
+        @consumed = 0
+      end
+
+      def read(slice : Bytes) : Int32
+        0
+      end
+
+      def write(slice : Bytes) : Nil
+        @buffer.write(slice)
+        flush_full_chunks
+      end
+
+      def close : Nil
+        finish
+      end
+
+      def finish : Nil
+        flush_full_chunks
+        remaining = @buffer.size - @consumed
+        if remaining > 0
+          write_chunk(@buffer.to_slice[@consumed, remaining], "IDAT")
+        end
+        @buffer = IO::Memory.new
+        @consumed = 0
+      end
+
+      private def flush_full_chunks : Nil
+        while @buffer.size - @consumed >= @chunk_size
+          write_chunk(@buffer.to_slice[@consumed, @chunk_size], "IDAT")
+          @consumed += @chunk_size
+        end
+        compact_buffer if @consumed > 0 && @buffer.size - @consumed < @chunk_size
+      end
+
+      private def compact_buffer : Nil
+        remaining = @buffer.size - @consumed
+        if remaining > 0
+          next_buffer = IO::Memory.new
+          next_buffer.write(@buffer.to_slice[@consumed, remaining])
+          @buffer = next_buffer
+        else
+          @buffer = IO::Memory.new
+        end
+        @consumed = 0
+      end
+
+      private def write_chunk(buf : Bytes, name : String) : Nil
+        n = buf.size.to_u32
+        raise FormatError.new("#{name} chunk is too large") unless n.to_i == buf.size
+        header = Bytes.new(8)
+        IO::ByteFormat::BigEndian.encode(n, header[0..4])
+        header[4..].copy_from(name.to_unsafe, name.size)
+        crc = CRC.new
+        crc.write(header[4..])
+        crc.write(buf)
+        @target.write(header)
+        @target.write(buf)
+        @target.write_bytes(crc.sum32, IO::ByteFormat::BigEndian)
+      end
+    end
+
     private getter cb : ColorBit
 
     private def initialize(@io : IO, @image : CrImage::Image, @level = CompressionLevel::Default)
@@ -77,13 +146,13 @@ module CrImage::PNG
       mw, mh = image.bounds.width.to_i64, image.bounds.height.to_i64
       max_size = 1_i64 << 32
       if mw <= 0 || mh <= 0 || mw >= max_size || mh >= max_size
-        FormatError.new("Invalid Image size: #{mw} x #{mh}")
+        raise FormatError.new("Invalid Image size: #{mw} x #{mh}")
       end
     end
 
     private def write_chunk(buf, name)
       n = buf.size.to_u32
-      FormatError.new("#{name} chunk is too large") unless n.to_i == buf.size
+      raise FormatError.new("#{name} chunk is too large") unless n.to_i == buf.size
       header = Bytes.new(8)
 
       IO::ByteFormat::BigEndian.encode(n, header[0..4])
@@ -163,12 +232,12 @@ module CrImage::PNG
         tmp[3*256 + idx] = c1.a
       end
       write_chunk(tmp[...3*pal.size], "PLTE")
-      write_chunk(tmp[3*256...3*256 + 1 + last], "tRNS")
+      write_chunk(tmp[3*256...3*256 + 1 + last], "tRNS") if last >= 0
     end
 
     private def write_idat
-      buf = IO::Memory.new
-      Compress::Zlib::Writer.open(buf, level: level_to_zlib) do |zlib_writer|
+      chunk_io = IDATChunkIO.new(@io)
+      Compress::Zlib::Writer.open(chunk_io, level: level_to_zlib) do |zlib_writer|
         bits_per_pixel = case cb
                          when .g8?    then 8
                          when .tc8?   then 24
@@ -346,9 +415,7 @@ module CrImage::PNG
           pr, cr[0] = cr[0], pr
         end
       end
-      buf.rewind
-      write_chunk(buf.to_slice, "IDAT")
-      buf.close
+      chunk_io.finish
     end
 
     private def write_end
@@ -413,6 +480,7 @@ module CrImage::PNG
       end
 
       # The Sub filter
+      sum = 0
       0.upto(bpp - 1) do |i|
         cdat1[i] = cdat0[i]
         sum += abs8 cdat1[i]
@@ -445,8 +513,8 @@ module CrImage::PNG
 
     # whether or not the image is fully opaque
     private def opaque?
-      if (o = @image).responds_to?(:opaque)
-        return o.opaque
+      if (o = @image).responds_to?(:opaque?)
+        return o.opaque?
       end
       b = @image.bounds
       b.min.y.upto(b.max.y - 1) do |y|

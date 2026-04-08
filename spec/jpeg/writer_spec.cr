@@ -76,6 +76,15 @@ describe CrImage::JPEG::Writer do
       end
     end
 
+    it "rejects empty image dimensions" do
+      img = CrImage::Gray.new(CrImage.rect(0, 0, 0, 0))
+      io = IO::Memory.new
+
+      expect_raises(CrImage::JPEG::FormatError, /dimensions must be positive/) do
+        CrImage::JPEG.write(io, img, 75)
+      end
+    end
+
     it "writes to file" do
       rect = CrImage.rect(0, 0, 8, 8)
       img = CrImage::Gray.new(rect)

@@ -1,6 +1,9 @@
 module CrImage::JPEG
   # Huffman table for JPEG encoding/decoding
   struct HuffmanTable
+    FAST_BITS = 12
+    FAST_SIZE = 1 << FAST_BITS
+
     property bits : Array(UInt8)    # Number of codes of each length (1-16)
     property values : Array(UInt8)  # Symbol values in order
     property codes : Array(UInt16)  # Generated Huffman codes
@@ -8,6 +11,9 @@ module CrImage::JPEG
     property maxcode : Array(Int32) # Largest code of each length
     property mincode : Array(Int32) # Smallest code of each length
     property valptr : Array(Int32)  # Index into values array
+    property look_fast : Slice(UInt16)
+    property encode_codes : StaticArray(UInt16, 256)
+    property encode_sizes : StaticArray(UInt8, 256)
 
     def initialize(@bits : Array(UInt8), @values : Array(UInt8))
       @codes = [] of UInt16
@@ -15,6 +21,9 @@ module CrImage::JPEG
       @maxcode = Array(Int32).new(17, -1)
       @mincode = Array(Int32).new(17, -1)
       @valptr = Array(Int32).new(17, 0)
+      @look_fast = Slice(UInt16).new(FAST_SIZE, 0_u16)
+      @encode_codes = StaticArray(UInt16, 256).new(0_u16)
+      @encode_sizes = StaticArray(UInt8, 256).new(0_u8)
       build_decode_table
     end
 
@@ -38,18 +47,55 @@ module CrImage::JPEG
         end
         c <<= 1
       end
+
+      code = 0_u16
+      @bits.each_with_index do |num, idx|
+        size = (idx + 1).to_u8
+        num.times do
+          @codes << code
+          @sizes << size
+          value = @values[@codes.size - 1]
+          @encode_codes[value] = code
+          @encode_sizes[value] = size
+
+          if size <= FAST_BITS
+            base = (code << (FAST_BITS - size)).to_i
+            limit = 1 << (FAST_BITS - size)
+            packed = ((size.to_u16 << 8) | value.to_u16)
+            limit.times do |suffix|
+              slot = base | suffix
+              @look_fast[slot] = packed
+            end
+          end
+
+          code += 1
+        end
+        code <<= 1
+      end
     end
 
     # Decode the next Huffman symbol from the BitReader
     # Returns the decoded symbol value (0-255)
+    @[AlwaysInline]
     def decode(reader : BitReader) : UInt8
+      bits = reader.available_bits
+      if bits >= FAST_BITS || reader.ensure_available_bits(FAST_BITS)
+        packed = @look_fast[reader.peek_bits(FAST_BITS)]
+        if packed != 0
+          reader.skip_bits((packed >> 8).to_i32)
+          return (packed & 0xFF).to_u8
+        end
+      elsif bits >= 8 || reader.ensure_available_bits(8)
+        packed = @look_fast[reader.peek_bits(8) << (FAST_BITS - 8)]
+        if packed != 0 && (packed >> 8) <= 8
+          reader.skip_bits((packed >> 8).to_i32)
+          return (packed & 0xFF).to_u8
+        end
+      end
+
       code = 0_i32
       0.upto(15) do |i|
-        # Read one bit
-        bit = reader.read_bit
-        if bit != 0
-          code |= 1
-        end
+        code = (code << 1) | reader.read_bit.to_i32
 
         # Check if this code length has any codes
         # i is 0-indexed, tables are 1-indexed (index 0 is unused)
@@ -59,9 +105,6 @@ module CrImage::JPEG
           index = @valptr[table_idx] + code - @mincode[table_idx]
           return @values[index]
         end
-
-        # Shift code left for next bit
-        code <<= 1
       end
 
       # If we get here, we didn't find a valid code
@@ -158,43 +201,100 @@ module CrImage::JPEG
   # BitReader for reading bits from an IO stream
   # Handles JPEG byte stuffing (0xFF 0x00 sequences)
   class BitReader
-    @buffer : UInt32   # Bit buffer
+    @buffer : UInt64   # Bit buffer
     @bits_left : Int32 # Number of valid bits in buffer
     @io : IO
+    @memory : IO::Memory?
+    @mem_bytes : Bytes
+    @mem_pos : Int32
     @end_of_scan : Bool # Flag to indicate we've hit a marker
+    @saved_marker : UInt8?
 
     def initialize(@io : IO)
-      @buffer = 0_u32
+      @buffer = 0_u64
       @bits_left = 0
+      @memory = @io.is_a?(IO::Memory) ? @io.as(IO::Memory) : nil
+      @mem_bytes = @memory ? @memory.not_nil!.to_slice : Bytes.empty
+      @mem_pos = @memory ? @memory.not_nil!.pos.to_i32 : 0
       @end_of_scan = false
+      @saved_marker = nil
     end
 
     # Read a single bit from the stream
+    @[AlwaysInline]
     def read_bit : UInt8
-      if @bits_left == 0
-        fill_buffer
-      end
-
+      ensure_bits(1) if @bits_left == 0
       @bits_left -= 1
-      bit = (@buffer >> @bits_left) & 1
-      bit.to_u8
+      ((@buffer >> @bits_left) & 1).to_u8
     end
 
     # Read n bits from the stream as a UInt16
     # n must be between 1 and 16
+    @[AlwaysInline]
     def read_bits(n : Int32) : UInt16
-      raise ArgumentError.new("n must be between 1 and 16") unless n >= 1 && n <= 16
+      ensure_bits(n) if @bits_left < n
+      @bits_left -= n
+      ((@buffer >> @bits_left) & ((1_u64 << n) - 1)).to_u16
+    end
 
-      result = 0_u16
-      n.times do
-        result = (result << 1) | read_bit
+    @[AlwaysInline]
+    def peek_bits(n : Int32) : Int32
+      ensure_bits(n) if @bits_left < n
+      ((@buffer >> (@bits_left - n)) & ((1_u64 << n) - 1)).to_i32
+    end
+
+    @[AlwaysInline]
+    def skip_bits(n : Int32) : Nil
+      ensure_bits(n) if @bits_left < n
+      @bits_left -= n
+    end
+
+    @[AlwaysInline]
+    def available_bits : Int32
+      @bits_left
+    end
+
+    def saved_marker : UInt8?
+      @saved_marker
+    end
+
+    def finish : Nil
+      if memory = @memory
+        memory.pos = @mem_pos
       end
-      result
+    end
+
+    @[AlwaysInline]
+    def ensure_available_bits(n : Int32) : Bool
+      return true if @bits_left >= n
+      ensure_bits(n)
+      @bits_left >= n
     end
 
     # Read a byte-stuffed byte from the stream
     # Returns nil if we hit a marker (0xFF followed by non-0x00)
+    @[AlwaysInline]
     private def read_byte_stuffed : UInt8?
+      if @memory
+        return nil if @mem_pos >= @mem_bytes.size
+
+        byte = @mem_bytes[@mem_pos]
+        @mem_pos += 1
+
+        return byte if byte != 0xFF
+
+        return nil if @mem_pos >= @mem_bytes.size
+
+        next_byte = @mem_bytes[@mem_pos]
+        @mem_pos += 1
+
+        return 0xFF_u8 if next_byte == 0x00
+
+        @end_of_scan = true
+        @saved_marker = next_byte
+        return nil
+      end
+
       byte = @io.read_byte
       return nil if byte.nil?
 
@@ -209,19 +309,20 @@ module CrImage::JPEG
       return 0xFF_u8 if next_byte == 0x00
 
       # 0xFF followed by non-0x00 is a marker - end of scan data
-      # We don't consume the marker, but we can't "unread" it in Crystal
-      # So we mark end of scan and return nil
+      # Save the marker byte so the parser can resume from the correct segment.
       @end_of_scan = true
+      @saved_marker = next_byte
       nil
     end
 
     # Fill the bit buffer with the next byte from the stream
     # Handles JPEG byte stuffing: 0xFF 0x00 -> 0xFF
+    @[AlwaysInline]
     private def fill_buffer : Nil
       # If we've hit end of scan, just fill with 1s to allow
       # decoding to complete with remaining bits
       if @end_of_scan
-        @buffer = (@buffer << 8) | 0xFF
+        @buffer = (@buffer << 8) | 0xFF_u64
         @bits_left += 8
         return
       end
@@ -232,7 +333,7 @@ module CrImage::JPEG
         # Hit end of scan or end of stream
         # Fill with 1s to allow decoding to complete
         @end_of_scan = true
-        @buffer = (@buffer << 8) | 0xFF
+        @buffer = (@buffer << 8) | 0xFF_u64
         @bits_left += 8
       else
         @buffer = (@buffer << 8) | byte
@@ -240,10 +341,69 @@ module CrImage::JPEG
       end
     end
 
+    @[AlwaysInline]
+    private def ensure_bits(n : Int32) : Nil
+      if @memory
+        if @end_of_scan
+          while @bits_left < n
+            @buffer = (@buffer << 8) | 0xFF_u64
+            @bits_left += 8
+          end
+          return
+        end
+
+        bytes = @mem_bytes
+        pos = @mem_pos
+        size = bytes.size
+
+        while @bits_left < n && @bits_left <= 56 && pos < size
+          byte = bytes[pos]
+          pos += 1
+
+          if byte == 0xFF
+            if pos >= size
+              @end_of_scan = true
+              break
+            end
+
+            next_byte = bytes[pos]
+            pos += 1
+
+            if next_byte == 0x00
+              byte = 0xFF_u8
+            else
+              @end_of_scan = true
+              @saved_marker = next_byte
+              break
+            end
+          end
+
+          @buffer = (@buffer << 8) | byte
+          @bits_left += 8
+        end
+
+        @mem_pos = pos
+        @end_of_scan = true if pos >= size && @bits_left < n
+
+        if @end_of_scan
+          while @bits_left < n
+            @buffer = (@buffer << 8) | 0xFF_u64
+            @bits_left += 8
+          end
+        end
+        return
+      end
+
+      while @bits_left < n
+        fill_buffer
+        break if @end_of_scan
+      end
+    end
+
     # Align to byte boundary by discarding remaining bits
     def align_to_byte : Nil
       @bits_left = 0
-      @buffer = 0_u32
+      @buffer = 0_u64
     end
   end
 
@@ -273,11 +433,26 @@ module CrImage::JPEG
     # n must be between 1 and 16
     def write_bits(value : UInt16, n : Int32) : Nil
       raise ArgumentError.new("n must be between 1 and 16") unless n >= 1 && n <= 16
+      masked = if n == 16
+                 value.to_u32
+               else
+                 (value & ((1_u16 << n) &- 1_u16)).to_u32
+               end
 
-      # Write bits from most significant to least significant
-      (n - 1).downto(0) do |i|
-        bit = ((value >> i) & 1).to_u8
-        write_bit(bit)
+      @buffer = (@buffer << n) | masked
+      @bits_used += n
+
+      while @bits_used >= 8
+        shift = @bits_used - 8
+        byte = ((@buffer >> shift) & 0xFF).to_u8
+        @io.write_byte(byte)
+        @io.write_byte(0x00_u8) if byte == 0xFF
+        @bits_used -= 8
+        if @bits_used == 0
+          @buffer = 0_u32
+        else
+          @buffer &= (1_u32 << @bits_used) &- 1_u32
+        end
       end
     end
 

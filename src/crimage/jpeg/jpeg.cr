@@ -65,12 +65,15 @@ module CrImage::JPEG
   # Quantization table
   struct QuantTable
     property table : Array(UInt16)
+    property reciprocal : Array(Float64)
 
     def initialize
       @table = Array(UInt16).new(64, 0_u16)
+      @reciprocal = Array(Float64).new(64, 0.0)
     end
 
     def initialize(@table : Array(UInt16))
+      @reciprocal = @table.map { |value| 1.0 / value.to_f64 }
     end
   end
 
