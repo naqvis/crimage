@@ -49,6 +49,7 @@ module CrImage::JPEG
     @pixel_buf : Bytes
     @block_nonzero : Slice(Int32)
     @block_nonzero_count : Int32
+
     private def initialize(@io : IO)
       @frame_header = nil
       @quant_tables = Array(QuantTable?).new(4, nil)
@@ -423,7 +424,6 @@ module CrImage::JPEG
         component = Component.new(id, h_samp, v_samp, quant_table)
         @frame_header.not_nil!.components << component
       end
-
     end
 
     # Parse DHT (Define Huffman Table) segment
@@ -1049,7 +1049,6 @@ module CrImage::JPEG
         end
       end
     end
-
 
     # Refine block for successive approximation (progressive JPEG)
     @[AlwaysInline]
