@@ -23,7 +23,8 @@ module CrImage::WEBP
     # Write n bits from value in little-endian order.
     # n must be between 0 and 64.
     # value must fit within n bits.
-    def write_bits(value : UInt64, n : Int32) : Nil
+    def write_bits(value : UInt64, n : Number) : Nil
+      n = n.to_i
       raise ArgumentError.new("Invalid bit count: must be between 1 and 64") if n < 0 || n > 64
 
       # Validate value fits in n bits (this will catch n=0 with value > 0)

@@ -100,6 +100,39 @@ describe CrImage::JPEG::Writer do
       File.delete(path)
     end
 
+    it "encodes huffman symbols via bit writer with correct types" do
+      table = CrImage::JPEG::HuffmanTable.new(
+        CrImage::JPEG::STANDARD_DC_LUMINANCE_BITS.to_a,
+        CrImage::JPEG::STANDARD_DC_LUMINANCE_VALUES.to_a,
+      )
+
+      # Verify encode tables are populated
+      table.encode_sizes[0].should be_a(UInt8)
+      table.encode_sizes[0].should be > 0_u8
+
+      # Write a minimal JPEG to exercise the full encode pipeline
+      io = IO::Memory.new
+      rect = CrImage.rect(0, 0, 8, 8)
+      img = CrImage::RGBA.new(rect)
+      8.times do |y|
+        8.times do |x|
+          img.pix[y * 8 * 4 + x * 4] = (x * 32).to_u8
+          img.pix[y * 8 * 4 + x * 4 + 1] = (y * 32).to_u8
+          img.pix[y * 8 * 4 + x * 4 + 2] = 128_u8
+          img.pix[y * 8 * 4 + x * 4 + 3] = 255_u8
+        end
+      end
+      CrImage::JPEG.write(io, img, 75)
+
+      io.rewind
+      data = io.to_slice
+      data.size.should be > 200
+      data[0].should eq(0xFF)
+      data[1].should eq(0xD8)
+      data[data.size - 2].should eq(0xFF)
+      data[data.size - 1].should eq(0xD9)
+    end
+
     it "round-trip test: encode then decode grayscale" do
       # Create a simple grayscale image
       rect = CrImage.rect(0, 0, 16, 16)
@@ -121,6 +154,31 @@ describe CrImage::JPEG::Writer do
       decoded = CrImage::JPEG.read(io)
 
       # Verify dimensions
+      decoded.bounds.width.should eq(16)
+      decoded.bounds.height.should eq(16)
+    end
+
+    it "round-trip test: encode then decode color image" do
+      # Create a color image with varied content to exercise
+      # both DC and AC Huffman encoding paths (which call encode_huffman_symbol)
+      rect = CrImage.rect(0, 0, 16, 16)
+      original = CrImage::RGBA.new(rect)
+
+      16.times do |y|
+        16.times do |x|
+          original.pix[y * 16 * 4 + x * 4] = (x * 16).to_u8
+          original.pix[y * 16 * 4 + x * 4 + 1] = (y * 16).to_u8
+          original.pix[y * 16 * 4 + x * 4 + 2] = ((x + y) * 8).to_u8
+          original.pix[y * 16 * 4 + x * 4 + 3] = 255_u8
+        end
+      end
+
+      io = IO::Memory.new
+      CrImage::JPEG.write(io, original, 85)
+
+      io.rewind
+      decoded = CrImage::JPEG.read(io)
+
       decoded.bounds.width.should eq(16)
       decoded.bounds.height.should eq(16)
     end

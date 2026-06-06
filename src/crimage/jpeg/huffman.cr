@@ -431,7 +431,8 @@ module CrImage::JPEG
 
     # Write n bits from value to the stream
     # n must be between 1 and 16
-    def write_bits(value : UInt16, n : Int32) : Nil
+    def write_bits(value : UInt16, n : Number) : Nil
+      n = n.to_i
       raise ArgumentError.new("n must be between 1 and 16") unless n >= 1 && n <= 16
       masked = if n == 16
                  value.to_u32
